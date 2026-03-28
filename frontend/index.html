@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Riskism - Nền tảng Agentic AI đánh giá rủi ro chứng khoán Việt Nam">
+    <title>RISKISM | Stock Risk Intelligence</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=DM+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <!-- ═══ TOP BAR: Brand + Market Tabs + Live Ticker ═══ -->
+    <header id="top-bar" class="top-bar">
+        <div class="top-bar-left">
+            <h1 class="brand">RISKISM</h1>
+            <nav class="market-tabs" id="market-tabs">
+                <button class="market-tab active" data-index="VNINDEX">VN-INDEX</button>
+            </nav>
+        </div>
+        <div class="top-bar-right">
+            <div class="live-ticker" id="live-ticker">
+                <div class="ticker-chip up" id="ticker-vnindex"><span class="ticker-name">VN-INDEX</span><span class="ticker-val" id="ticker-vnindex-val">+1.2%</span></div>
+
+            </div>
+            <span class="market-status" id="market-status">🔴 CLOSED</span>
+            <span class="clock" id="clock">12:45:00 PM</span>
+            <div class="notify-wrapper" id="notify-wrapper">
+                <button class="icon-btn" id="btn-notify" title="Notifications">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                    <span class="notify-dot" id="notify-dot"></span>
+                </button>
+                <div class="notify-panel" id="notify-panel">
+                    <div class="notify-panel-header">Alerts & Anomalies</div>
+                    <div class="notify-panel-body" id="notify-list">
+                        <div class="notify-empty">No alerts yet. Run AI Agent to detect anomalies.</div>
+                    </div>
+                </div>
+            </div>
+            <div class="user-info" id="user-info">
+                <span class="user-name" id="user-display-name">—</span>
+                <button class="btn-outline btn-xs" id="btn-logout" title="Logout">Logout</button>
+            </div>
+        </div>
+    </header>
+
+    <!-- ═══ SUB NAV ═══ -->
+    <nav class="sub-nav" id="sub-nav">
+        <button class="sub-nav-btn active" data-tab="dashboard" id="nav-dashboard">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+            Dashboard
+        </button>
+        <button class="sub-nav-btn" data-tab="risk-analysis" id="nav-risk">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+            Risk Analysis
+        </button>
+        <button class="sub-nav-btn" data-tab="portfolio" id="nav-portfolio">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+            Portfolio
+        </button>
+        <button class="sub-nav-btn" data-tab="reports" id="nav-reports">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            Reports
+        </button>
+    </nav>
+
+    <!-- ═══ MAIN ═══ -->
+    <main class="main">
+        <!-- ══════════════ DASHBOARD TAB ══════════════ -->
+        <section class="tab-panel active" data-tab="dashboard" id="tab-dashboard">
+            <div class="dashboard-grid">
+                <!-- ── LEFT: Portfolio Holdings ── -->
+                <div class="card card-holdings" id="card-holdings">
+                    <div class="card-top">
+                        <h2 class="card-title">Portfolio Holdings</h2>
+                        <div class="card-top-actions">
+                            <button class="btn-primary btn-sm" id="btn-run-agent-dash">
+                                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                                Run AI
+                            </button>
+                            <span class="badge badge-live">LIVE STATUS</span>
+                        </div>
+                    </div>
+                    <table class="holdings-table" id="holdings-table">
+                        <thead>
+                            <tr>
+                                <th>Ticker</th>
+                                <th class="text-right">Price</th>
+                                <th class="text-right">Value</th>
+                                <th class="text-right">P&L</th>
+                                <th class="text-right">Today</th>
+                            </tr>
+                        </thead>
+                        <tbody id="holdings-tbody">
+                            <tr><td colspan="5"><div class="skeleton skeleton-box"></div></td></tr>
+                        </tbody>
+                    </table>
+                    <div class="holdings-summary" id="holdings-summary">
+                        <div class="summary-row"><span class="summary-label">TOTAL MARKET VALUE</span><span class="summary-value mono" id="dash-total-value">—</span></div>
+                        <div class="summary-row"><span class="summary-label">TOTAL P&L</span><span class="summary-value mono" id="dash-total-pnl-pct">—</span></div>
+                        <div class="summary-row"><span class="summary-label">UNREALIZED P&L</span><span class="summary-value mono" id="dash-total-pnl">—</span></div>
+                    </div>
+                </div>
+
+                <!-- ── MIDDLE: News Intelligence ── -->
+                <div class="card card-news" id="card-news">
+                    <div class="card-top">
+                        <h2 class="card-title">News Intelligence</h2>
+                    </div>
+                    <div class="news-toggle" id="news-toggle">
+                        <button class="toggle-btn active" data-filter="market">Market</button>
+                        <button class="toggle-btn" data-filter="company">Company</button>
+                    </div>
+                    <div class="news-search-wrap">
+                        <input type="text" id="news-search" class="news-search-input" placeholder="🔍 Filter by keyword or ticker..." autocomplete="off">
+                    </div>
+                    <div class="news-feed" id="news-feed">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+
+                <!-- ── RIGHT: AI Insights ── -->
+                <div class="card card-ai" id="card-ai">
+                    <div class="card-top">
+                        <h2 class="card-title"><span class="ai-sparkle">✦</span> AI Insights</h2>
+                        <span class="badge badge-risk medium" id="ai-risk-badge">ANALYZING...</span>
+                    </div>
+                    <p class="ai-summary" id="ai-summary">
+                        Đang phân tích dữ liệu danh mục... Nhấn "Run AI" để nhận insight từ AI Agent.
+                    </p>
+                    <div class="ai-signals" id="ai-signals">
+                        <div class="signal-item">
+                            <span class="signal-icon check">✓</span>
+                            <span>Portfolio risk metrics đã sẵn sàng — nhấn Run AI để phân tích chuyên sâu.</span>
+                        </div>
+                    </div>
+                    <table class="ai-trends" id="ai-trends">
+                        <thead>
+                            <tr><th>TICKER</th><th>RISK</th><th class="text-right">SCORE</th></tr>
+                        </thead>
+                        <tbody id="ai-trends-body">
+                            <tr><td>VCB</td><td class="neutral">—</td><td class="text-right mono">—</td></tr>
+                            <tr><td>FPT</td><td class="neutral">—</td><td class="text-right mono">—</td></tr>
+                            <tr><td>HPG</td><td class="neutral">—</td><td class="text-right mono">—</td></tr>
+                        </tbody>
+                    </table>
+                    <div class="ai-confidence-bar">
+                        <div class="confidence-fill" id="confidence-fill" style="width: 0%"></div>
+                    </div>
+                </div>
+                
+                <!-- AI Reflection Mode -->
+                <div class="card card-ai" id="card-reflection" style="margin-top: 16px;">
+                    <div class="card-top">
+                        <h2 class="card-title">🧠 AI Reflection Loop</h2>
+                        <span class="badge badge-risk" id="reflection-score">-- ACCURACY</span>
+                    </div>
+                    <p class="ai-summary" id="reflection-lesson">
+                        Self-evaluation triggered at market close to analyze prediction accuracy.
+                    </p>
+                </div>
+            </div>
+
+            <!-- ── BOTTOM: Core Risk Metrics ── -->
+            <div class="metrics-section">
+                <div class="metrics-header">
+                    <h2 class="section-title">Core Risk Metrics</h2>
+                    <span class="section-subtitle">PORTFOLIO STABILITY METRICS</span>
+                </div>
+                <div class="metrics-row" id="metrics-row">
+                    <div class="metric-card var">
+                        <div class="metric-top">
+                            <span class="metric-label">VAR (95%)</span>
+                            <svg class="metric-icon-svg" width="20" height="20" fill="none" stroke="#E74C3C" stroke-width="2" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                        </div>
+                        <div class="metric-big" id="m-var">4.2%</div>
+                        <div class="metric-delta up" id="m-var-delta">+0.4%</div>
+                        <div class="spark-container"><canvas class="spark" id="spark-var"></canvas></div>
+                    </div>
+                    <div class="metric-card sharpe">
+                        <div class="metric-top">
+                            <span class="metric-label">SHARPE RATIO</span>
+                            <svg class="metric-icon-svg" width="20" height="20" fill="none" stroke="#27AE60" stroke-width="2" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                        </div>
+                        <div class="metric-big" id="m-sharpe">1.8</div>
+                        <div class="metric-sub optimal" id="m-sharpe-sub">Optimal</div>
+                        <div class="spark-container"><canvas class="spark" id="spark-sharpe"></canvas></div>
+                    </div>
+                    <div class="metric-card drawdown">
+                        <div class="metric-top">
+                            <span class="metric-label">MAX DRAWDOWN</span>
+                            <svg class="metric-icon-svg" width="20" height="20" fill="none" stroke="#F39C12" stroke-width="2" viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+                        </div>
+                        <div class="metric-big" id="m-drawdown">-12.5%</div>
+                        <div class="metric-sub monitor" id="m-drawdown-sub">Monitor</div>
+                        <div class="spark-container"><canvas class="spark" id="spark-drawdown"></canvas></div>
+                    </div>
+                    <div class="metric-card beta">
+                        <div class="metric-top">
+                            <span class="metric-label">PORTFOLIO BETA</span>
+                            <svg class="metric-icon-svg" width="20" height="20" fill="none" stroke="#3498DB" stroke-width="2" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                        </div>
+                        <div class="metric-big" id="m-beta">0.95</div>
+                        <div class="metric-sub stable" id="m-beta-sub">Stable</div>
+                        <div class="spark-container"><canvas class="spark" id="spark-beta"></canvas></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══════════════ RISK ANALYSIS TAB ══════════════ -->
+        <section class="tab-panel" data-tab="risk-analysis" id="tab-risk-analysis">
+            <div class="ra-grid">
+                <!-- Risk Heatmap -->
+                <div class="card card-wide" id="card-heatmap">
+                    <div class="card-top">
+                        <h2 class="card-title">Risk Heatmap — Your Portfolio</h2>
+                        <div class="period-select">
+                            <button class="period-btn active" data-days="30">1M</button>
+                            <button class="period-btn" data-days="90">3M</button>
+                            <button class="period-btn" data-days="180">6M</button>
+                        </div>
+                    </div>
+                    <div class="heatmap-grid" id="heatmap-grid">
+                        <!-- Generated by JS -->
+                    </div>
+                </div>
+
+                <!-- Individual Stock Risk -->
+                <div class="card" id="card-stock-risk">
+                    <div class="card-top">
+                        <h2 class="card-title">Stock Risk Detail</h2>
+                        <select class="select-input" id="ra-symbol-select">
+                            <option value="VCB">VCB</option>
+                            <option value="FPT">FPT</option>
+                            <option value="HPG">HPG</option>
+                        </select>
+                    </div>
+                    <div class="risk-detail-grid" id="risk-detail-grid">
+                        <!-- Generated by JS -->
+                    </div>
+                </div>
+
+                <!-- Anomaly Detection -->
+                <div class="card" id="card-anomalies-ra">
+                    <div class="card-top">
+                        <h2 class="card-title">Anomaly Detection</h2>
+                        <span class="badge badge-count" id="anomaly-badge">0</span>
+                    </div>
+                    <div class="anomaly-feed" id="anomaly-feed">
+                        <div class="empty-msg">Phát hiện bất thường: volume spike, volatility shift, price breakout.<br>Dữ liệu đang được phân tích...</div>
+                    </div>
+                </div>
+
+                <!-- Correlation Matrix -->
+                <div class="card" id="card-correlation">
+                    <div class="card-top">
+                        <h2 class="card-title">Correlation Matrix</h2>
+                    </div>
+                    <div class="correlation-table-wrap" id="correlation-wrap">
+                        <div class="empty-msg">Đo mức độ tương quan giữa các cổ phiếu — đánh giá đa dạng hóa.<br>Dữ liệu đang được tính toán...</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══════════════ PORTFOLIO TAB ══════════════ -->
+        <section class="tab-panel" data-tab="portfolio" id="tab-portfolio">
+            <div class="pf-grid">
+                <!-- Portfolio Overview -->
+                <div class="card card-wide" id="card-pf-overview">
+                    <div class="card-top">
+                        <h2 class="card-title">Portfolio Overview</h2>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn-outline" id="btn-edit-pf">⚙️ Manage Holdings</button>
+                            <button class="btn-primary" id="btn-run-agent">Morning Agent</button>
+                            <button class="btn-outline" id="btn-run-reflection">Afternoon Review</button>
+                        </div>
+                    </div>
+                    <div class="pf-stats" id="pf-stats">
+                        <div class="pf-stat"><span class="pf-stat-label">Total Value</span><span class="pf-stat-value mono" id="pf-total">—</span></div>
+                        <div class="pf-stat"><span class="pf-stat-label">Total P&L</span><span class="pf-stat-value mono" id="pf-pnl">—</span></div>
+                        <div class="pf-stat"><span class="pf-stat-label">Capital Tier</span><span class="pf-stat-value" id="pf-tier">—</span></div>
+                        <div class="pf-stat"><span class="pf-stat-label">Max Positions</span><span class="pf-stat-value mono" id="pf-maxpos">—</span></div>
+                        <div class="pf-stat"><span class="pf-stat-label">Diversification</span><span class="pf-stat-value mono" id="pf-div">—</span></div>
+                        <div class="pf-stat"><span class="pf-stat-label">Vol Regime</span><span class="pf-stat-value" id="pf-vol">—</span></div>
+                        <div class="pf-stat"><span class="pf-stat-label">HHI Index</span><span class="pf-stat-value mono" id="pf-hhi">—</span></div>
+                    </div>
+                </div>
+
+                <!-- Performance Chart -->
+                <div class="card card-wide" id="card-pf-performance">
+                    <div class="card-top"><h2 class="card-title">Portfolio Performance (30 Days)</h2></div>
+                    <div class="chart-container" style="position: relative; height: 300px; width: 100%; display: flex; align-items: center; justify-content: center;">
+                        <canvas id="pf-performance-chart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Sector Allocation -->
+                <div class="card" id="card-sector">
+                    <div class="card-top"><h2 class="card-title">Sector Allocation</h2></div>
+                    <div class="sector-bars" id="sector-bars">
+                        <!-- Generated by JS -->
+                    </div>
+                </div>
+
+                <!-- Capital Advice -->
+                <div class="card" id="card-advice">
+                    <div class="card-top"><h2 class="card-title">💡 Capital Advice</h2></div>
+                    <div class="advice-content" id="advice-content">
+                        <div class="empty-msg">Run Agent to get personalized advice</div>
+                    </div>
+                </div>
+
+                <!-- Full Holdings Table -->
+                <div class="card card-wide" id="card-full-holdings">
+                    <div class="card-top"><h2 class="card-title">Detailed Holdings</h2></div>
+                    <table class="full-table" id="full-holdings-table">
+                        <thead>
+                            <tr>
+                                <th>Ticker</th>
+                                <th class="text-right">Qty</th>
+                                <th class="text-right">Avg Price</th>
+                                <th class="text-right">Latest</th>
+                                <th class="text-right">Mkt Value</th>
+                                <th class="text-right">P&L</th>
+                                <th class="text-right">Risk</th>
+                                <th class="text-right">VaR 95%</th>
+                                <th class="text-right">Sharpe</th>
+                                <th class="text-right">Beta</th>
+                            </tr>
+                        </thead>
+                        <tbody id="full-holdings-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ══════════════ REPORTS TAB ══════════════ -->
+        <section class="tab-panel" data-tab="reports" id="tab-reports">
+            <div class="rp-grid">
+                <!-- Latest AI Report -->
+                <div class="card card-wide" id="card-report">
+                    <div class="card-top">
+                        <h2 class="card-title">🧠 Latest AI Report</h2>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <span class="report-time" id="report-time">—</span>
+                            <button class="btn-outline btn-xs" id="btn-export-report">📄 Export PNG</button>
+                        </div>
+                    </div>
+                    <div class="report-body" id="report-body">
+                        <div class="empty-msg">Click <strong>"Run AI"</strong> on the Dashboard to generate your first risk report</div>
+                    </div>
+                </div>
+
+                <!-- Prediction Timeline -->
+                <div class="card card-wide" id="card-prediction-timeline">
+                    <div class="card-top">
+                        <h2 class="card-title">📈 Prediction Accuracy Timeline</h2>
+                        <span class="badge">LEARNING HISTORY</span>
+                    </div>
+                    <div class="timeline-body" id="timeline-body">
+                        <div class="empty-msg">Run Morning Agent + Afternoon Review to build prediction history</div>
+                    </div>
+                </div>
+
+                <!-- Self-Reflection -->
+                <div class="card" id="card-reflection">
+                    <div class="card-top">
+                        <h2 class="card-title">🔄 Self-Reflection Loop</h2>
+                        <span class="badge">FEEDBACK</span>
+                    </div>
+                    <div class="reflection-body" id="reflection-body">
+                        <div class="empty-msg">Morning prediction → Afternoon actual → Lessons learned</div>
+                    </div>
+                </div>
+
+                <!-- Agent Execution Log -->
+                <div class="card" id="card-agent-log">
+                    <div class="card-top">
+                        <h2 class="card-title">📋 Agent Execution Log</h2>
+                    </div>
+                    <div class="log-body" id="log-body">
+                        <div class="empty-msg">Agent has not been triggered yet</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- ═══ FOOTER STATUS BAR ═══ -->
+    <footer class="status-bar" id="status-bar">
+        <div class="status-left">
+            <span class="status-dot" id="status-dot"></span>
+            <span class="status-text" id="status-connection">Connecting...</span>
+            <span class="status-sep">·</span>
+            <span class="status-text" id="status-last-update">Last update: —</span>
+        </div>
+        <div class="status-right">
+            <span class="status-text">Riskism API v3.1</span>
+            <span class="status-sep">·</span>
+            <span class="status-text kbd-hint">Ctrl+R Run AI · 1-4 Switch Tabs</span>
+        </div>
+    </footer>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loading-overlay">
+        <div class="loading-box">
+            <div class="spinner"></div>
+            <p id="loading-text">Running AI Agent...</p>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast-wrap" id="toast-wrap"></div>
+
+    <!-- Login Modal -->
+    <div class="modal" id="modal-login">
+        <div class="modal-content">
+            <h2 class="modal-title">Welcome to RISKISM</h2>
+            <p class="modal-desc">Enter your username to access your secure portfolio environment. A new account will be created if the username does not exist.</p>
+            <div class="form-group">
+                <input type="text" id="login-username" class="form-input" placeholder="e.g. demo_user" autocomplete="off">
+            </div>
+            <button class="btn-primary w-full" id="btn-login" style="margin-top: 16px;">Access Terminal</button>
+        </div>
+    </div>
+
+    <!-- Edit Portfolio Modal -->
+    <div class="modal" id="modal-portfolio">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2 class="modal-title">Manage Portfolio</h2>
+                <button class="icon-btn" onclick="document.getElementById('modal-portfolio').classList.remove('active')">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Total Capital Strategy (VND)</label>
+                    <input type="number" id="edit-pf-capital" class="form-input mono" placeholder="e.g. 50000000">
+                </div>
+                <h3 class="subsection-title">Current Holdings</h3>
+                <div id="holdings-editor">
+                    <!-- JS injects rows here -->
+                </div>
+                <button class="btn-outline w-full" id="btn-add-holding" style="margin-top: 12px;">+ Add Position</button>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-primary w-full" id="btn-save-portfolio">Save Portfolio & Reload</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/charts.js"></script>
+    <script src="js/components.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+# FastAPI & Server
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+websockets==14.1
+python-multipart==0.0.19
+
+# Database
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+alembic==1.14.1
+
+# Redis
+redis==5.2.1
+
+# Celery
+celery[redis]==5.4.0
+
+# AI - Google Gemini
+google-genai==1.0.0
+
+# Data - Vietnamese Stock Market
+vnstock>=3.4.0
+
+# Data Processing
+numpy==2.2.1
+scipy==1.15.0
+pandas==2.2.3
+
+# RSS & News
+feedparser==6.0.11
+beautifulsoup4==4.12.3
+httpx==0.28.1
+
+# Utils
+python-dotenv==1.0.1
+pydantic==2.10.4
+pydantic-settings==2.7.1
+python-dateutil==2.9.0
