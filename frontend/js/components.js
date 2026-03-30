@@ -108,6 +108,15 @@ const UI = {
         return `${Math.floor(hrs / 24)}D AGO`;
     },
 
+    _formatBadgeText(text) {
+        return String(text || '').trim().toUpperCase();
+    },
+
+    _renderFinancialChip(value, tone = 'neutral') {
+        const normalizedTone = tone === 'positive' || tone === 'negative' ? tone : 'neutral';
+        return `<span class="metric-chip ${normalizedTone}">${value}</span>`;
+    },
+
     // ─── AI Insights ─────────────────────────────
     renderAI(insight) {
         if (!insight) return;
@@ -119,7 +128,7 @@ const UI = {
 
         if (badge) {
             const lvl = insight.risk_level || 'medium';
-            badge.textContent = `${lvl.toUpperCase()} RISK`;
+            badge.textContent = this._formatBadgeText(`${lvl} risk`);
             badge.className = `badge badge-risk ${lvl}`;
         }
         if (summary) summary.textContent = insight.summary || '';
@@ -157,7 +166,7 @@ const UI = {
         const avgRisk = Object.values(stockRisks).reduce((s, r) => s + (r.risk_score || 50), 0) / Object.keys(stockRisks).length;
         const level = avgRisk > 70 ? 'high' : avgRisk > 45 ? 'medium' : 'low';
         if (badge) {
-            badge.textContent = `${level.toUpperCase()} RISK`;
+            badge.textContent = this._formatBadgeText(`${level} risk`);
             badge.className = `badge badge-risk ${level}`;
         }
 
@@ -303,8 +312,8 @@ const UI = {
             const latestPrice = h.latest_price || h.avg_price;
             const pnlPct = h.pnl_pct || 0;
             const dailyChange = h.daily_change_pct || 0;
-            const cls = pnlPct >= 0 ? 'low' : 'high';
-            const dailyCls = dailyChange >= 0 ? 'low' : 'high';
+            const pnlTone = pnlPct > 0 ? 'positive' : pnlPct < 0 ? 'negative' : 'neutral';
+            const dailyTone = dailyChange > 0 ? 'positive' : dailyChange < 0 ? 'negative' : 'neutral';
 
             // Price flash animation
             const prevPrice = this._prevPrices.get(h.symbol);
@@ -333,8 +342,8 @@ const UI = {
                 <td class="ticker-cell">${h.symbol}<span class="ticker-sector">${displaySector}</span></td>
                 <td class="text-right mono">${this._formatPrice(latestPrice)}</td>
                 <td class="text-right mono">${this._formatVND(marketValue)}</td>
-                <td class="text-right"><span class="badge badge-risk ${cls} mono" style="font-size: 0.72rem; letter-spacing: normal; text-transform: none; padding: 2px 6px;">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%</span></td>
-                <td class="text-right"><span class="badge badge-risk ${dailyCls} mono" style="font-size: 0.72rem; letter-spacing: normal; text-transform: none; padding: 2px 6px;">${dailyChange >= 0 ? '+' : ''}${dailyChange.toFixed(1)}%</span></td>
+                <td class="text-right">${this._renderFinancialChip(`${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%`, pnlTone)}</td>
+                <td class="text-right">${this._renderFinancialChip(`${dailyChange >= 0 ? '+' : ''}${dailyChange.toFixed(1)}%`, dailyTone)}</td>
             </tr>`;
         }).join('');
     },
@@ -373,14 +382,14 @@ const UI = {
 
         const tierEl = document.getElementById('pf-tier');
         if (tierEl) {
-            tierEl.textContent = tier;
+            tierEl.textContent = this._formatBadgeText(tier);
             const tierBadge = tier === 'SMALL' ? 'badge-tier-small' : tier === 'WHALE' ? 'badge-tier-whale' : 'badge-tier-medium';
             tierEl.className = `pf-stat-value badge badge-tier ${tierBadge}`;
         }
 
         const volEl = document.getElementById('pf-vol');
         if (volEl) {
-            volEl.textContent = vol;
+            volEl.textContent = this._formatBadgeText(vol);
             volEl.className = `pf-stat-value badge ${vol === 'NORMAL' ? 'badge-live' : 'badge-risk high'}`;
         }
 
@@ -445,7 +454,7 @@ const UI = {
                 const latestPrice = h.latest_price || h.avg_price;
                 const marketVal = h.market_value || h.quantity * h.avg_price;
                 const pnlPct = h.pnl_pct || 0;
-                const pnlCls = pnlPct >= 0 ? 'low' : 'high';
+                const pnlTone = pnlPct > 0 ? 'positive' : pnlPct < 0 ? 'negative' : 'neutral';
 
                 return `<tr>
                     <td><strong>${h.symbol}</strong></td>
@@ -453,7 +462,7 @@ const UI = {
                     <td class="text-right mono">${this._formatPrice(h.avg_price)}</td>
                     <td class="text-right mono">${this._formatPrice(latestPrice)}</td>
                     <td class="text-right mono">${this._formatVND(marketVal)}</td>
-                    <td class="text-right"><span class="badge badge-risk ${pnlCls} mono" style="font-size: 0.72rem; letter-spacing: normal; text-transform: none; padding: 2px 6px;">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%</span></td>
+                    <td class="text-right">${this._renderFinancialChip(`${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%`, pnlTone)}</td>
                     <td class="text-right"><span class="risk-pill ${rcls}">${rs}</span></td>
                     <td class="text-right mono">${((r.var_95 || 0) * 100).toFixed(2)}%</td>
                     <td class="text-right mono">${(r.sharpe_ratio || 0).toFixed(2)}</td>
@@ -864,7 +873,7 @@ const UI = {
         if (time) time.textContent = insight.saved_at ? new Date(insight.saved_at).toLocaleString('vi-VN') : '';
         body.innerHTML = `
             <h3 class="report-title">${insight.title || 'AI Risk Report'}</h3>
-            <span class="report-risk-tag ${insight.risk_level || 'medium'}">Risk: ${(insight.risk_level || 'MEDIUM').toUpperCase()}</span>
+            <span class="report-risk-tag ${insight.risk_level || 'medium'}">${this._formatBadgeText(`Risk: ${insight.risk_level || 'medium'}`)}</span>
             <p class="report-summary">${insight.summary || ''}</p>
             ${this._reportSection('📌 Key Findings', insight.key_findings)}
             ${this._reportSection('⚠️ Risk Factors', insight.risk_factors)}

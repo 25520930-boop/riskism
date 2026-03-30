@@ -6,6 +6,7 @@ V3.0: Simplified endpoints, shared risk logic, global error handling.
 import json
 import asyncio
 import time as _time
+import re
 from collections import defaultdict
 from datetime import datetime
 from typing import List, Optional
@@ -21,6 +22,7 @@ from backend.database import SyncSessionLocal
 from backend.config import get_settings
 from backend.agent.orchestrator import AgentOrchestrator
 from backend.data.vnstock_client import VnstockClient
+from backend.firebase_auth import get_firebase_public_config, verify_firebase_id_token
 
 settings = get_settings()
 
@@ -201,6 +203,50 @@ async def health_check():
 class LoginRequest(BaseModel):
     username: str
 
+class FirebaseLoginRequest(BaseModel):
+    id_token: str
+    username_hint: Optional[str] = None
+
+def _ensure_firebase_user_columns(db):
+    db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(255)"))
+    db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)"))
+    db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT"))
+    db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid ON users(firebase_uid) WHERE firebase_uid IS NOT NULL"))
+    db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL"))
+
+def _slugify_username(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9_]+", "_", (value or "").strip().lower())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized[:40] or "riskism_user"
+
+def _pick_username_seed(decoded: dict, username_hint: Optional[str] = None) -> str:
+    email = (decoded.get("email") or "").strip()
+    name = (decoded.get("name") or "").strip()
+    preferred = (username_hint or "").strip()
+
+    candidates = [
+        preferred,
+        name,
+        email.split("@")[0] if email else "",
+        f"user_{str(decoded.get('uid', 'firebase'))[:8]}",
+    ]
+    for candidate in candidates:
+        slug = _slugify_username(candidate)
+        if slug:
+            return slug
+    return "riskism_user"
+
+def _ensure_unique_username(db, base_username: str) -> str:
+    username = base_username
+    suffix = 1
+    while db.execute(
+        text("SELECT 1 FROM users WHERE username = :u"),
+        {"u": username},
+    ).fetchone():
+        suffix += 1
+        username = f"{base_username}_{suffix}"
+    return username
+
 @app.post("/api/auth/login")
 async def login(request: LoginRequest):
     """Simple demo login/signup."""
@@ -230,6 +276,97 @@ async def login(request: LoginRequest):
         db.rollback()
         print(f"[AUTH FALLBACK] DB error, using mock login: {e}")
         return {"user_id": 1, "username": username, "capital_amount": 20000000, "is_new": False}
+    finally:
+        db.close()
+
+@app.get("/api/auth/firebase/config")
+async def firebase_config():
+    """Return client-safe Firebase config when Firebase Auth is enabled."""
+    return get_firebase_public_config()
+
+@app.post("/api/auth/firebase/login")
+async def firebase_login(request: FirebaseLoginRequest):
+    """Authenticate via Firebase ID token and map to local user record."""
+    decoded = verify_firebase_id_token(request.id_token)
+    if not decoded:
+        raise HTTPException(status_code=400, detail="Firebase authentication is not configured or token is invalid")
+
+    firebase_uid = str(decoded.get("uid") or "").strip()
+    if not firebase_uid:
+        raise HTTPException(status_code=400, detail="Firebase token missing uid")
+
+    email = (decoded.get("email") or "").strip().lower() or None
+    display_name = (decoded.get("name") or request.username_hint or "").strip()
+    picture = (decoded.get("picture") or "").strip() or None
+
+    db = SyncSessionLocal()
+    try:
+        _ensure_firebase_user_columns(db)
+
+        user = db.execute(
+            text(
+                "SELECT id, username, capital_amount FROM users "
+                "WHERE firebase_uid = :uid OR (:email IS NOT NULL AND email = :email) "
+                "ORDER BY id ASC LIMIT 1"
+            ),
+            {"uid": firebase_uid, "email": email},
+        ).fetchone()
+
+        if user:
+            db.execute(
+                text(
+                    "UPDATE users SET firebase_uid = :uid, email = COALESCE(:email, email), "
+                    "avatar_url = COALESCE(:avatar, avatar_url), updated_at = NOW() "
+                    "WHERE id = :user_id"
+                ),
+                {
+                    "uid": firebase_uid,
+                    "email": email,
+                    "avatar": picture,
+                    "user_id": user[0],
+                },
+            )
+            db.commit()
+            return {
+                "user_id": user[0],
+                "username": user[1],
+                "capital_amount": user[2],
+                "is_new": False,
+                "auth_provider": "firebase",
+                "email": email,
+                "display_name": display_name or user[1],
+            }
+
+        username = _ensure_unique_username(db, _pick_username_seed(decoded, request.username_hint))
+        result = db.execute(
+            text(
+                "INSERT INTO users (username, firebase_uid, email, avatar_url, risk_appetite, capital_amount) "
+                "VALUES (:username, :uid, :email, :avatar, 'moderate', 0) RETURNING id"
+            ),
+            {
+                "username": username,
+                "uid": firebase_uid,
+                "email": email,
+                "avatar": picture,
+            },
+        )
+        user_id = result.fetchone()[0]
+        db.commit()
+        return {
+            "user_id": user_id,
+            "username": username,
+            "capital_amount": 0,
+            "is_new": True,
+            "auth_provider": "firebase",
+            "email": email,
+            "display_name": display_name or username,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"[FIREBASE AUTH] Login failed: {e}")
+        raise HTTPException(status_code=500, detail="Firebase login failed")
     finally:
         db.close()
 

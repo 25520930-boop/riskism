@@ -6,11 +6,18 @@
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     username VARCHAR(100) UNIQUE NOT NULL,
+    firebase_uid VARCHAR(255) UNIQUE,
+    email VARCHAR(255) UNIQUE,
+    avatar_url TEXT,
     risk_appetite VARCHAR(20) DEFAULT 'moderate' CHECK (risk_appetite IN ('conservative', 'moderate', 'aggressive')),
     capital_amount DECIMAL(15,2) DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(255);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;
 
 -- Portfolio Holdings
 CREATE TABLE IF NOT EXISTS portfolios (
@@ -113,6 +120,8 @@ CREATE TABLE IF NOT EXISTS reflections (
 -- Indexes for performance
 -- ============================================
 CREATE INDEX IF NOT EXISTS idx_portfolios_user ON portfolios(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid ON users(firebase_uid) WHERE firebase_uid IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_market_data_symbol_date ON market_data(symbol, trade_date DESC);
 CREATE INDEX IF NOT EXISTS idx_news_published ON news(published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_news_symbols ON news USING GIN(related_symbols);

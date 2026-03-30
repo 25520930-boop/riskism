@@ -54,6 +54,17 @@ class RiskismAPI {
         return await this.post('/api/auth/login', { username });
     }
 
+    async getFirebaseConfig() {
+        return await this.get('/api/auth/firebase/config');
+    }
+
+    async loginWithFirebase(idToken, usernameHint = '') {
+        return await this.post('/api/auth/firebase/login', {
+            id_token: idToken,
+            username_hint: usernameHint,
+        });
+    }
+
     // ─── Market Data ─────────────────────────────────────
 
     async getMarketData(symbol, days = 180) {

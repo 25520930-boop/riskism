@@ -18,6 +18,7 @@ celery[redis]==5.4.0
 
 # AI - Google Gemini
 google-genai==1.0.0
+firebase-admin==6.7.0
 
 # Data - Vietnamese Stock Market
 vnstock>=3.4.0

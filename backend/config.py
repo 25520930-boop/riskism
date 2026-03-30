@@ -27,6 +27,17 @@ class Settings(BaseSettings):
     # Gemini AI
     gemini_api_key: str = ""
 
+    # Firebase Auth
+    firebase_project_id: str = ""
+    firebase_api_key: str = ""
+    firebase_auth_domain: str = ""
+    firebase_storage_bucket: str = ""
+    firebase_messaging_sender_id: str = ""
+    firebase_app_id: str = ""
+    firebase_measurement_id: str = ""
+    firebase_service_account_path: str = ""
+    firebase_service_account_json: str = ""
+
     # Celery
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"

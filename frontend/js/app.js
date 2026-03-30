@@ -11,9 +11,12 @@ class RiskismApp {
         this.userId = localStorage.getItem('riskism_user_id') || null;
         this.username = localStorage.getItem('riskism_username') || null;
         this.API_TIMEOUT = 15000;
+        this.firebaseEnabled = false;
+        this._bootstrapped = false;
     }
 
     async init() {
+        await this.initFirebaseAuth();
         this.bindAuth();
         
         if (!this.userId) {
@@ -25,6 +28,17 @@ class RiskismApp {
     }
 
     finishInit() {
+        const nameEl = document.getElementById('user-display-name');
+        if (nameEl) nameEl.textContent = this.username || 'User';
+
+        if (this._bootstrapped) {
+            this.loadAllData();
+            this.updateStatusBar('connected');
+            UI.toast(`Welcome back, ${this.username}! 🚀`, 'success');
+            return;
+        }
+
+        this._bootstrapped = true;
         this.bindNavigation();
         this.bindAgentButton();
         this.bindNewsToggle();
@@ -36,10 +50,6 @@ class RiskismApp {
         this.bindKeyboardShortcuts();
         this.startClock();
         this.loadMarketTicker();
-
-        // Show user identity
-        const nameEl = document.getElementById('user-display-name');
-        if (nameEl) nameEl.textContent = this.username || 'User';
 
         // Draw demo sparklines immediately
         charts.drawAllSparklines(null);
@@ -57,6 +67,46 @@ class RiskismApp {
 
         // Export Report button
         document.getElementById('btn-export-report')?.addEventListener('click', () => this.exportReport());
+    }
+
+    async initFirebaseAuth() {
+        const googleBtn = document.getElementById('btn-login-google');
+        const divider = document.getElementById('auth-divider');
+        const note = document.getElementById('firebase-auth-note');
+
+        try {
+            const payload = await api.getFirebaseConfig();
+            const enabled = Boolean(
+                payload?.enabled &&
+                payload?.config &&
+                window.FirebaseAuthBridge &&
+                window.FirebaseAuthBridge.init(payload.config)
+            );
+            this.firebaseEnabled = enabled;
+            [googleBtn, divider, note].forEach(el => el?.classList.toggle('hidden', !enabled));
+            if (note) {
+                note.textContent = enabled
+                    ? 'Google sign-in is enabled via Firebase Auth.'
+                    : '';
+            }
+        } catch (err) {
+            console.warn('[Firebase] Config bootstrap failed:', err);
+            this.firebaseEnabled = false;
+            [googleBtn, divider, note].forEach(el => el?.classList.add('hidden'));
+        }
+    }
+
+    completeLoginSession(res) {
+        if (!res || !res.user_id) return false;
+
+        this.userId = res.user_id;
+        this.username = res.display_name || res.username;
+        localStorage.setItem('riskism_user_id', res.user_id);
+        localStorage.setItem('riskism_username', this.username);
+        localStorage.setItem('riskism_auth_provider', res.auth_provider || 'local');
+        document.getElementById('modal-login').classList.remove('active');
+        this.finishInit();
+        return true;
     }
 
     async exportReport() {
@@ -87,6 +137,7 @@ class RiskismApp {
     bindAuth() {
         const btn = document.getElementById('btn-login');
         const input = document.getElementById('login-username');
+        const googleBtn = document.getElementById('btn-login-google');
         if (!btn || !input) return;
 
         const doLogin = async () => {
@@ -98,14 +149,7 @@ class RiskismApp {
             btn.disabled = true;
             try {
                 const res = await api.login(val);
-                if (res && res.user_id) {
-                    this.userId = res.user_id;
-                    this.username = res.username;
-                    localStorage.setItem('riskism_user_id', res.user_id);
-                    localStorage.setItem('riskism_username', res.username);
-                    document.getElementById('modal-login').classList.remove('active');
-                    this.finishInit();
-                } else {
+                if (!this.completeLoginSession(res)) {
                     UI.toast('Login error, please try again.', 'error');
                 }
             } catch (e) {
@@ -118,6 +162,39 @@ class RiskismApp {
 
         btn.addEventListener('click', doLogin);
         input.addEventListener('keypress', (e) => { if(e.key==='Enter') doLogin() });
+
+        if (googleBtn) {
+            googleBtn.addEventListener('click', async () => {
+                if (!this.firebaseEnabled || !window.FirebaseAuthBridge?.enabled) {
+                    UI.toast('Firebase Auth chưa được cấu hình trên backend', 'info');
+                    return;
+                }
+
+                googleBtn.textContent = 'Opening Google...';
+                googleBtn.disabled = true;
+                try {
+                    const firebaseUser = await window.FirebaseAuthBridge.signInWithGoogle();
+                    const res = await api.loginWithFirebase(
+                        firebaseUser.idToken,
+                        firebaseUser.displayName || firebaseUser.email || input.value.trim()
+                    );
+                    if (!this.completeLoginSession(res)) {
+                        UI.toast('Firebase login error, please try again.', 'error');
+                    }
+                } catch (e) {
+                    const message = String(e?.message || '');
+                    if (message.includes('popup') || message.includes('cancel')) {
+                        UI.toast('Google sign-in was cancelled', 'info');
+                    } else {
+                        console.error('[Firebase Login]', e);
+                        UI.toast('Firebase sign-in failed', 'error');
+                    }
+                } finally {
+                    googleBtn.textContent = 'Continue with Google';
+                    googleBtn.disabled = false;
+                }
+            });
+        }
     }
 
     // ─── Navigation ──────────────────────────────
@@ -170,9 +247,11 @@ class RiskismApp {
     bindLogout() {
         const btn = document.getElementById('btn-logout');
         if (!btn) return;
-        btn.addEventListener('click', () => {
+        btn.addEventListener('click', async () => {
+            await window.FirebaseAuthBridge?.signOut?.();
             localStorage.removeItem('riskism_user_id');
             localStorage.removeItem('riskism_username');
+            localStorage.removeItem('riskism_auth_provider');
             this.userId = null;
             this.username = null;
             document.getElementById('modal-login').classList.add('active');

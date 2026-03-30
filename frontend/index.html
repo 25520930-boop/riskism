@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=DM+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/styles.css?v=11">
+    <link rel="stylesheet" href="css/styles.css?v=15">
 </head>
 <body>
     <!-- ═══ TOP BAR: Brand + Market Tabs + Live Ticker ═══ -->
@@ -419,11 +419,14 @@
     <div class="modal" id="modal-login">
         <div class="modal-content">
             <h2 class="modal-title">Welcome to RISKISM</h2>
-            <p class="modal-desc">Enter your username to access your secure portfolio environment. A new account will be created if the username does not exist.</p>
+            <p class="modal-desc">Enter your username to access your secure portfolio environment. A new account will be created if the username does not exist. If Firebase is configured, you can also sign in with Google.</p>
             <div class="form-group">
                 <input type="text" id="login-username" class="form-input" placeholder="e.g. demo_user" autocomplete="off">
             </div>
             <button class="btn-primary w-full" id="btn-login" style="margin-top: 16px;">Access Terminal</button>
+            <div class="auth-divider hidden" id="auth-divider"><span>or</span></div>
+            <button class="btn-outline w-full firebase-btn hidden" id="btn-login-google" type="button">Continue with Google</button>
+            <div class="auth-note hidden" id="firebase-auth-note">Firebase Auth is ready.</div>
         </div>
     </div>
 
@@ -476,9 +479,12 @@
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-    <script src="js/api.js?v=11"></script>
-    <script src="js/charts.js?v=11"></script>
-    <script src="js/components.js?v=11"></script>
-    <script src="js/app.js?v=11"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
+    <script src="js/api.js?v=15"></script>
+    <script src="js/charts.js?v=15"></script>
+    <script src="js/components.js?v=15"></script>
+    <script src="js/firebase-auth.js?v=15"></script>
+    <script src="js/app.js?v=15"></script>
 </body>
 </html>
