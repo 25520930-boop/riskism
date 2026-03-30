@@ -181,7 +181,7 @@ class RiskismAPI {
 
     async getNews(limit = 20) {
         const data = await this.get(`/api/news/latest?limit=${limit}`);
-        return data || this.getDemoNews();
+        return data || { articles: [], total: 0, fetched_at: new Date().toISOString() };
     }
 
     // ─── Agent ───────────────────────────────────────────

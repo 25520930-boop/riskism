@@ -8,21 +8,31 @@ const UI = {
     // ─── News Feed ───────────────────────────────
     renderNews(articles) {
         const feed = document.getElementById('news-feed');
-        if (!feed || !articles) return;
+        if (!feed) return;
+        if (!articles || articles.length === 0) {
+            this.renderNewsEmpty('Chưa có tin tức realtime phù hợp.');
+            return;
+        }
         feed.innerHTML = articles.map(a => {
             const s = a.sentiment || {};
             const score = s.score || 0;
             const cls = score > 0.1 ? 'up' : score < -0.1 ? 'down' : 'neutral';
             const icon = score > 0.1 ? '⊕' : score < -0.1 ? '⊖' : '◎';
             const outlook = s.reasoning || (score > 0.1 ? 'Bullish Momentum' : score < -0.1 ? 'Yield Pressure' : 'Neutral Outlook');
-            const symbols = (a.related_symbols || []).slice(0, 2);
+            const symbols = (a.related_symbols || []).slice(0, 3);
             const time = a.published_at ? this._relTime(a.published_at) : '';
+            const sourceLabel = this._formatNewsSource(a.source);
+            const headline = a.url
+                ? `<a href="${a.url}" target="_blank" rel="noopener noreferrer">${a.title}</a>`
+                : a.title;
             return `<div class="news-item">
                 <div class="news-meta-bar">
                     ${symbols.map(s => `<span class="news-ticker-badge">${s}</span>`).join('')}
+                    <span class="news-source">${sourceLabel}</span>
                     <span class="news-time">${time}</span>
                 </div>
-                <div class="news-headline">${a.title}</div>
+                <div class="news-headline">${headline}</div>
+                <div class="news-summary">${a.summary || ''}</div>
                 <div class="news-sentiment-row">
                     <span class="sentiment-chip ${cls}"><span class="sentiment-icon">${icon}</span> ${score > 0 ? '+' : ''}${score.toFixed(1)}</span>
                     <span class="news-outlook">${outlook}</span>
@@ -31,40 +41,61 @@ const UI = {
         }).join('');
     },
 
+    renderNewsEmpty(message = 'Chưa có tin tức realtime phù hợp.') {
+        const feed = document.getElementById('news-feed');
+        if (!feed) return;
+        feed.innerHTML = `<div class="empty-msg">${message}</div>`;
+    },
+
     filterAndRenderNews(articles, tab = 'market') {
-        if (!articles || articles.length === 0) return;
+        if (!articles || articles.length === 0) {
+            this.renderNewsEmpty('Chưa có tin tức realtime phù hợp.');
+            return;
+        }
         let filtered;
         if (tab === 'company') {
             const portfolioSyms = window._cachedPortfolioSymbols || [];
             if (portfolioSyms.length === 0) {
-                const feed = document.getElementById('news-feed');
-                if (feed) {
-                    feed.innerHTML = `<div class="empty-msg">Chưa có cổ phiếu nào trong danh mục để lọc company news.</div>`;
-                }
+                this.renderNewsEmpty('Chưa có cổ phiếu nào trong danh mục để lọc company news.');
                 return;
             }
             filtered = articles.filter(a => {
-                const syms = a.related_symbols || [];
-                return syms.some(s => portfolioSyms.includes(s));
+                const scopes = Array.isArray(a.news_scope) ? a.news_scope : [];
+                const syms = (a.related_symbols || []).filter(s => s !== 'VNINDEX');
+                const matchesScope = scopes.length > 0 ? scopes.includes('company') : syms.length > 0;
+                return matchesScope && syms.some(s => portfolioSyms.includes(s));
             });
         } else {
             filtered = articles.filter(a => {
+                const scopes = Array.isArray(a.news_scope) ? a.news_scope : [];
+                if (scopes.length > 0) return scopes.includes('market');
                 const syms = a.related_symbols || [];
-                return syms.length === 0 || syms.includes('VNINDEX');
+                return syms.includes('VNINDEX');
             });
         }
         if (filtered.length === 0) {
-            const feed = document.getElementById('news-feed');
-            if (feed) {
-                feed.innerHTML = `<div class="empty-msg">${
-                    tab === 'company'
-                        ? 'Chưa có tin tức mới cho các mã trong danh mục.'
-                        : 'Không có tin tức nào.'
-                }</div>`;
-            }
+            this.renderNewsEmpty(
+                tab === 'company'
+                    ? 'Chưa có tin tức mới cho các mã trong danh mục.'
+                    : 'Chưa có tin thị trường Việt Nam nổi bật trong lúc này.'
+            );
             return;
         }
         this.renderNews(filtered);
+    },
+
+    _formatNewsSource(source) {
+        const map = {
+            cafef_stock: 'CafeF Stock',
+            cafef_home: 'CafeF',
+            vietstock_stock: 'Vietstock Stock',
+            vietstock_analysis: 'Vietstock View',
+            vietstock_macro: 'Vietstock Macro',
+            vietstock_enterprise: 'Vietstock DN',
+            vnexpress_business: 'VNExpress Biz',
+            thanhnien_finance: 'Thanh Nien Biz',
+        };
+        return map[source] || (source || 'RSS').replace(/_/g, ' ');
     },
 
     _relTime(iso) {
@@ -484,42 +515,322 @@ const UI = {
         }
     },
 
-    // ─── Correlation Matrix Rendering ─────────────
-    renderCorrelationMatrix(matrix, warnings) {
+    // ─── Risk Network Map ─────────────────────────
+    _buildRiskNetworkLayout(symbols, edges, width, height, nodeRadii = {}) {
+        const positions = {};
+        const maxRadius = Math.max(...Object.values(nodeRadii), 24);
+        const margin = Math.max(54, Math.ceil(maxRadius) + 24);
+        const centerX = width / 2;
+        const centerY = height / 2;
+        const maxPairs = Math.max(1, (symbols.length * (symbols.length - 1)) / 2);
+        const edgeDensity = edges.length / maxPairs;
+        const edgeWeights = {};
+        symbols.forEach(symbol => { edgeWeights[symbol] = 0; });
+        edges.forEach(edge => {
+            edgeWeights[edge.source] = (edgeWeights[edge.source] || 0) + edge.weight;
+            edgeWeights[edge.target] = (edgeWeights[edge.target] || 0) + edge.weight;
+        });
+        const orderedSymbols = [...symbols].sort((a, b) => {
+            const diff = (edgeWeights[b] || 0) - (edgeWeights[a] || 0);
+            return Math.abs(diff) > 0.001 ? diff : a.localeCompare(b);
+        });
+
+        if (orderedSymbols.length === 1) {
+            positions[orderedSymbols[0]] = { x: centerX, y: centerY };
+            return positions;
+        }
+
+        const ringSizes = [];
+        let placed = 0;
+        let ringIndex = 0;
+        while (placed < orderedSymbols.length) {
+            const capacity = ringIndex === 0
+                ? Math.min(6, orderedSymbols.length - placed)
+                : Math.min(orderedSymbols.length - placed, 10 + ringIndex * 4);
+            ringSizes.push(capacity);
+            placed += capacity;
+            ringIndex += 1;
+        }
+
+        const baseRadius = Math.max(82, Math.min(width, height) * 0.18);
+        const ringGap = Math.max(52, Math.min(84, Math.min(width, height) / (ringSizes.length + 3)));
+        let cursor = 0;
+        ringSizes.forEach((ringSize, ring) => {
+            const radius = ringSizes.length === 1
+                ? Math.max(92, Math.min(width, height) * 0.28)
+                : baseRadius + ring * ringGap;
+            for (let slot = 0; slot < ringSize; slot++) {
+                const symbol = orderedSymbols[cursor++];
+                const angle = (-Math.PI / 2) + ((Math.PI * 2 * slot) / ringSize) + (ring % 2 ? 0.14 : 0);
+                positions[symbol] = {
+                    x: centerX + Math.cos(angle) * radius,
+                    y: centerY + Math.sin(angle) * radius,
+                };
+            }
+        });
+
+        const seedPositions = Object.fromEntries(
+            Object.entries(positions).map(([symbol, pos]) => [symbol, { ...pos }])
+        );
+        const preferredSpacing = Math.max(82, Math.min(width, height) / (Math.sqrt(symbols.length) + 0.15));
+        const repulsionBase = 6200 + (symbols.length * 620);
+        const gravityBase = symbols.length > 18 ? 0.0044 : 0.0032;
+        const springStrength = 0.018 + edgeDensity * 0.02;
+
+        for (let step = 0; step < 260; step++) {
+            const forces = {};
+            symbols.forEach(symbol => {
+                forces[symbol] = { x: 0, y: 0 };
+            });
+
+            for (let i = 0; i < symbols.length; i++) {
+                for (let j = i + 1; j < symbols.length; j++) {
+                    const s1 = symbols[i];
+                    const s2 = symbols[j];
+                    const p1 = positions[s1];
+                    const p2 = positions[s2];
+                    let dx = p2.x - p1.x;
+                    let dy = p2.y - p1.y;
+                    let dist = Math.hypot(dx, dy);
+                    if (dist < 1) {
+                        dx = 1;
+                        dy = 1;
+                        dist = Math.hypot(dx, dy);
+                    }
+                    const repulsion = repulsionBase / (dist * dist);
+                    const nx = dx / dist;
+                    const ny = dy / dist;
+                    forces[s1].x -= nx * repulsion;
+                    forces[s1].y -= ny * repulsion;
+                    forces[s2].x += nx * repulsion;
+                    forces[s2].y += ny * repulsion;
+
+                    const minDistance = (nodeRadii[s1] || 24) + (nodeRadii[s2] || 24) + preferredSpacing * 0.42;
+                    if (dist < minDistance) {
+                        const overlap = (minDistance - dist) * 0.22;
+                        forces[s1].x -= nx * overlap;
+                        forces[s1].y -= ny * overlap;
+                        forces[s2].x += nx * overlap;
+                        forces[s2].y += ny * overlap;
+                    }
+                }
+            }
+
+            edges.forEach(edge => {
+                const sourcePos = positions[edge.source];
+                const targetPos = positions[edge.target];
+                let dx = targetPos.x - sourcePos.x;
+                let dy = targetPos.y - sourcePos.y;
+                let dist = Math.hypot(dx, dy);
+                if (dist < 1) dist = 1;
+                const desired = Math.max(
+                    preferredSpacing * 0.85,
+                    160 - ((edge.weight - 0.7) / 0.3) * 74
+                );
+                const pull = (dist - desired) * springStrength;
+                const nx = dx / dist;
+                const ny = dy / dist;
+                forces[edge.source].x += nx * pull;
+                forces[edge.source].y += ny * pull;
+                forces[edge.target].x -= nx * pull;
+                forces[edge.target].y -= ny * pull;
+            });
+
+            symbols.forEach(symbol => {
+                const pos = positions[symbol];
+                const seed = seedPositions[symbol];
+                forces[symbol].x += (centerX - pos.x) * gravityBase;
+                forces[symbol].y += (centerY - pos.y) * gravityBase;
+                forces[symbol].x += (seed.x - pos.x) * 0.01;
+                forces[symbol].y += (seed.y - pos.y) * 0.01;
+                pos.x = Math.max(margin, Math.min(width - margin, pos.x + forces[symbol].x));
+                pos.y = Math.max(margin, Math.min(height - margin, pos.y + forces[symbol].y));
+            });
+        }
+
+        return positions;
+    },
+
+    _describeCorrelation(weight) {
+        if (weight >= 0.9) return 'Very High Correlation';
+        if (weight >= 0.8) return 'High Correlation';
+        return 'Elevated Correlation';
+    },
+
+    _riskNodeStyle(riskScore) {
+        if (riskScore >= 65) {
+            return { fill: '#DC2626', glow: 'rgba(220, 38, 38, 0.24)', label: 'High Risk' };
+        }
+        if (riskScore <= 40) {
+            return { fill: '#16A34A', glow: 'rgba(22, 163, 74, 0.22)', label: 'Safe' };
+        }
+        return { fill: '#F59E0B', glow: 'rgba(245, 158, 11, 0.22)', label: 'Medium Risk' };
+    },
+
+    renderRiskNetworkMap(matrix, riskMetrics, warnings) {
         const wrap = document.getElementById('correlation-wrap');
-        if (!wrap || !matrix) return;
-        const symbols = Object.keys(matrix);
+        if (!wrap) return;
+
+        const metrics = riskMetrics || {};
+        const symbols = Object.keys(metrics).length > 0 ? Object.keys(metrics) : Object.keys(matrix || {});
         if (symbols.length === 0) {
-            wrap.innerHTML = '<div class="empty-msg">Không đủ dữ liệu để tính correlation.</div>';
+            wrap.innerHTML = '<div class="empty-msg">Chưa có đủ dữ liệu để dựng sơ đồ liên kết rủi ro.</div>';
             return;
         }
 
-        let html = '<table class="corr-table"><thead><tr><th></th>';
-        symbols.forEach(s => html += `<th>${s}</th>`);
-        html += '</tr></thead><tbody>';
-
-        symbols.forEach(s1 => {
-            html += `<tr><td class="corr-label">${s1}</td>`;
-            symbols.forEach(s2 => {
-                const val = (matrix[s1] && matrix[s1][s2] !== undefined) ? matrix[s1][s2] : 0;
-                const absVal = Math.abs(val);
-                let bg, color;
-                if (s1 === s2) { bg = '#2563EB'; color = '#fff'; }
-                else if (absVal > 0.7) { bg = '#FEF2F2'; color = '#DC2626'; }
-                else if (absVal > 0.4) { bg = '#FFFBEB'; color = '#A16207'; }
-                else { bg = '#F0FDF4'; color = '#16A34A'; }
-                html += `<td class="corr-cell" style="background:${bg};color:${color}">${val.toFixed(2)}</td>`;
-            });
-            html += '</tr>';
+        const densityScale = symbols.length > 22 ? 0.76 : symbols.length > 14 ? 0.86 : 1;
+        const nodeMeta = {};
+        symbols.forEach(symbol => {
+            const score = Number(metrics?.[symbol]?.risk_score || 0);
+            const style = this._riskNodeStyle(score);
+            const radius = (20 + Math.min(8, score / 18)) * densityScale;
+            const levelClass = score >= 65 ? 'high-risk' : score <= 40 ? 'safe-risk' : 'medium-risk';
+            nodeMeta[symbol] = { score, style, radius, levelClass };
         });
-        html += '</tbody></table>';
+
+        const edges = [];
+        for (let i = 0; i < symbols.length; i++) {
+            for (let j = i + 1; j < symbols.length; j++) {
+                const source = symbols[i];
+                const target = symbols[j];
+                const weight = Number(matrix?.[source]?.[target] ?? matrix?.[target]?.[source] ?? 0);
+                if (weight > 0.7) {
+                    edges.push({ source, target, weight });
+                }
+            }
+        }
+
+        const width = symbols.length > 24 ? 900 : symbols.length > 18 ? 820 : symbols.length > 10 ? 720 : 640;
+        const height = Math.max(340, Math.min(620, 300 + (Math.ceil(symbols.length / 5) * 54)));
+        const nodeRadii = Object.fromEntries(
+            Object.entries(nodeMeta).map(([symbol, meta]) => [symbol, meta.radius])
+        );
+        const positions = this._buildRiskNetworkLayout(symbols, edges, width, height, nodeRadii);
+        const activeSymbol = document.getElementById('ra-symbol-select')?.value || symbols[0];
+
+        const edgeMarkup = edges.map(edge => {
+            const sourcePos = positions[edge.source];
+            const targetPos = positions[edge.target];
+            const strokeWidth = (2 + ((edge.weight - 0.7) / 0.3) * 7).toFixed(2);
+            const opacity = Math.min(0.95, 0.45 + ((edge.weight - 0.7) / 0.3) * 0.4).toFixed(2);
+            const edgeId = `${edge.source}-${edge.target}`;
+            const hitWidth = Math.max(14, Number(strokeWidth) + 10);
+            return `
+                <line class="risk-network-edge" data-edge-id="${edgeId}" x1="${sourcePos.x}" y1="${sourcePos.y}" x2="${targetPos.x}" y2="${targetPos.y}" stroke-width="${strokeWidth}" opacity="${opacity}"></line>
+                <line class="risk-network-edge-hit" data-edge-id="${edgeId}" data-source="${edge.source}" data-target="${edge.target}" data-weight="${edge.weight.toFixed(3)}" x1="${sourcePos.x}" y1="${sourcePos.y}" x2="${targetPos.x}" y2="${targetPos.y}" stroke-width="${hitWidth}"></line>
+            `;
+        }).join('');
+
+        const nodeMarkup = symbols.map(symbol => {
+            const pos = positions[symbol];
+            const { score, style, radius, levelClass } = nodeMeta[symbol];
+            const isActive = symbol === activeSymbol;
+            return `<g class="risk-network-node ${levelClass}${isActive ? ' active' : ''}" data-symbol="${symbol}" transform="translate(${pos.x}, ${pos.y})">
+                <circle class="risk-network-node-glow" r="${radius + 10}" fill="${style.glow}"></circle>
+                <circle class="risk-network-node-ring" r="${radius + 3}" fill="none" stroke="${isActive ? '#2563EB' : 'rgba(15, 23, 42, 0.08)'}" stroke-width="${isActive ? 3 : 2}"></circle>
+                <circle class="risk-network-node-core" r="${radius}" fill="${style.fill}"></circle>
+                <text class="risk-network-node-label" text-anchor="middle" y="4">${symbol}</text>
+                <text class="risk-network-node-score" text-anchor="middle" y="${radius + 18}">${score}/100</text>
+                <title>${symbol}: ${style.label} • Risk Score ${score}/100</title>
+            </g>`;
+        }).join('');
+
+        let html = `
+            <div class="risk-network-wrap">
+                <div class="risk-network-legend">
+                    <div class="risk-network-legend-item"><span class="risk-network-dot safe"></span><span>Nút xanh: an toàn</span></div>
+                    <div class="risk-network-legend-item"><span class="risk-network-dot medium"></span><span>Nút cam: rủi ro trung bình</span></div>
+                    <div class="risk-network-legend-item"><span class="risk-network-dot high"></span><span>Nút đỏ: rủi ro cao</span></div>
+                    <div class="risk-network-legend-item"><span class="risk-network-line"></span><span>Chỉ nối cặp có correlation &gt; 0.70</span></div>
+                </div>
+                <div class="risk-network-canvas">
+                    <svg class="risk-network-svg" viewBox="0 0 ${width} ${height}" style="height:${height}px" role="img" aria-label="Risk network map">
+                        ${edgeMarkup}
+                        ${nodeMarkup}
+                    </svg>
+                    <div class="risk-network-tooltip" id="risk-network-tooltip"></div>
+                </div>
+                ${edges.length === 0 ? '<div class="risk-network-empty">Chưa có cặp cổ phiếu nào trong danh mục có correlation lớn hơn 0.70.</div>' : ''}
+            </div>
+        `;
 
         if (warnings && warnings.length > 0) {
             html += '<div class="corr-warnings">';
-            warnings.forEach(w => html += `<div class="corr-warn-item">${w}</div>`);
+            warnings.forEach(w => { html += `<div class="corr-warn-item">${w}</div>`; });
             html += '</div>';
         }
+
         wrap.innerHTML = html;
+        const canvas = wrap.querySelector('.risk-network-canvas');
+        const tooltip = wrap.querySelector('.risk-network-tooltip');
+        const moveTooltip = (event, content) => {
+            if (!canvas || !tooltip) return;
+            tooltip.innerHTML = content;
+            tooltip.classList.add('visible');
+            const bounds = canvas.getBoundingClientRect();
+            const tooltipWidth = tooltip.offsetWidth || 190;
+            const tooltipHeight = tooltip.offsetHeight || 60;
+            let left = event.clientX - bounds.left + 16;
+            let top = event.clientY - bounds.top - tooltipHeight - 16;
+            if (left + tooltipWidth > bounds.width - 10) {
+                left = bounds.width - tooltipWidth - 10;
+            }
+            if (left < 10) left = 10;
+            if (top < 10) {
+                top = Math.min(bounds.height - tooltipHeight - 10, event.clientY - bounds.top + 18);
+            }
+            tooltip.style.left = `${left}px`;
+            tooltip.style.top = `${top}px`;
+        };
+        const hideTooltip = () => {
+            if (!tooltip) return;
+            tooltip.classList.remove('visible');
+        };
+
+        if (canvas) {
+            canvas.addEventListener('mouseleave', hideTooltip);
+        }
+
+        wrap.querySelectorAll('.risk-network-edge-hit').forEach(edge => {
+            const edgeId = edge.dataset.edgeId;
+            const visibleEdge = wrap.querySelector(`.risk-network-edge[data-edge-id="${edgeId}"]`);
+            const show = (event) => {
+                const weight = Number(edge.dataset.weight || 0);
+                const source = edge.dataset.source;
+                const target = edge.dataset.target;
+                if (visibleEdge) visibleEdge.classList.add('hovered');
+                moveTooltip(
+                    event,
+                    `<strong>${source} ↔ ${target}</strong><br>${weight.toFixed(2)} - ${this._describeCorrelation(weight)}`
+                );
+            };
+            edge.addEventListener('mouseenter', show);
+            edge.addEventListener('mousemove', show);
+            edge.addEventListener('mouseleave', () => {
+                if (visibleEdge) visibleEdge.classList.remove('hovered');
+                hideTooltip();
+            });
+        });
+        wrap.querySelectorAll('.risk-network-node').forEach(node => {
+            node.addEventListener('click', () => {
+                const symbol = node.dataset.symbol;
+                const select = document.getElementById('ra-symbol-select');
+                if (select) select.value = symbol;
+                this.renderStockDetail(symbol, metrics);
+                wrap.querySelectorAll('.risk-network-node').forEach(item => {
+                    item.classList.toggle('active', item.dataset.symbol === symbol);
+                    const ring = item.querySelector('.risk-network-node-ring');
+                    if (ring) {
+                        ring.setAttribute(
+                            'stroke',
+                            item.dataset.symbol === symbol ? '#2563EB' : 'rgba(15, 23, 42, 0.08)'
+                        );
+                        ring.setAttribute('stroke-width', item.dataset.symbol === symbol ? '3' : '2');
+                    }
+                });
+            });
+            node.addEventListener('mouseleave', hideTooltip);
+        });
     },
 
     renderStockDetail(symbol, riskMetrics) {

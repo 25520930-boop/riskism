@@ -59,19 +59,29 @@ class AgentOrchestrator:
 
     async def tool_fetch_news(self) -> List[Dict]:
         """Tool 2: Fetch latest news (runs in thread to avoid blocking)."""
-        self.log('PERCEPTION', 'Fetching news from CafeF RSS')
+        self.log('PERCEPTION', 'Fetching live Vietnamese market news via RSS')
         articles = await asyncio.to_thread(self.rss.fetch_all_news)
-        news_list = [a.to_dict() for a in articles[:30]]
+        news_list = []
 
-        for article in news_list:
+        for raw_article in articles[:60]:
+            article = raw_article.to_dict()
             symbols = self.rss.detect_related_symbols(
                 article.get('title', ''),
                 article.get('summary', '')
             )
-            article['related_symbols'] = symbols
+            article.update(
+                self.rss.classify_article(
+                    article.get('title', ''),
+                    article.get('summary', ''),
+                    article.get('source', ''),
+                    symbols,
+                )
+            )
+            if article.get('news_scope'):
+                news_list.append(article)
 
         self.state['news'] = news_list
-        self.log('PERCEPTION', f'Found {len(news_list)} articles')
+        self.log('PERCEPTION', f'Found {len(news_list)} relevant articles')
         return news_list
 
     def _fallback_portfolio(self, user_id: int) -> Dict:
@@ -146,17 +156,23 @@ class AgentOrchestrator:
     async def tool_score_sentiment_batch(self, articles: List[Dict]) -> List[Dict]:
         """Tool 4: Score sentiment for articles concurrently."""
         self.log('ANALYSIS', f'Scoring sentiment for {len(articles)} articles')
+        if not articles:
+            self.state['scored_news'] = []
+            return []
+
+        semaphore = asyncio.Semaphore(6)
 
         async def score_one(article):
-            result = await asyncio.to_thread(
-                self.llm.score_sentiment,
-                article.get('title', ''),
-                article.get('summary', '')
-            )
-            article['sentiment'] = result
+            async with semaphore:
+                result = await asyncio.to_thread(
+                    self.llm.score_sentiment,
+                    article.get('title', ''),
+                    article.get('summary', '')
+                )
+                article['sentiment'] = result
             return article
 
-        tasks = [score_one(a) for a in articles[:5]]  # Max 5 concurrent
+        tasks = [score_one(dict(a)) for a in articles]
         scored = await asyncio.gather(*tasks, return_exceptions=True)
 
         valid = []
@@ -172,18 +188,24 @@ class AgentOrchestrator:
     async def tool_classify_news_impact_batch(self, articles: List[Dict]) -> List[Dict]:
         """Tool 5: Classify impact of news concurrently."""
         self.log('ANALYSIS', f'Classifying impact for {len(articles)} articles')
+        if not articles:
+            self.state['classified_news'] = []
+            return []
+
+        semaphore = asyncio.Semaphore(6)
 
         async def classify_one(article):
-            result = await asyncio.to_thread(
-                self.llm.classify_news_impact,
-                article.get('title', ''),
-                article.get('summary', ''),
-                article.get('related_symbols', []),
-            )
-            article['impact'] = result
+            async with semaphore:
+                result = await asyncio.to_thread(
+                    self.llm.classify_news_impact,
+                    article.get('title', ''),
+                    article.get('summary', ''),
+                    article.get('related_symbols', []),
+                )
+                article['impact'] = result
             return article
 
-        tasks = [classify_one(a) for a in articles[:5]]
+        tasks = [classify_one(dict(a)) for a in articles]
         classified = await asyncio.gather(*tasks, return_exceptions=True)
 
         valid = [c for c in classified if isinstance(c, dict)]
@@ -412,6 +434,24 @@ class AgentOrchestrator:
             portfolio['holdings'], returns_dict, market_data
         )
 
+        from backend.risk_engine.capital_aware import find_hidden_correlations
+        correlation_matrix = {}
+        for i, s1 in enumerate(symbols):
+            row = {}
+            for j, s2 in enumerate(symbols):
+                if s1 in returns_dict and s2 in returns_dict:
+                    r1, r2 = returns_dict[s1], returns_dict[s2]
+                    min_len = min(len(r1), len(r2))
+                    if min_len > 5:
+                        corr = float(np.corrcoef(r1[-min_len:], r2[-min_len:])[0, 1])
+                        row[s2] = round(corr, 3)
+                    else:
+                        row[s2] = 0
+                else:
+                    row[s2] = 0
+            correlation_matrix[s1] = row
+        corr_warnings = find_hidden_correlations(symbols, returns_dict)
+
         # === REASONING PHASE (LLM) ===
         classified_news = self.state.get('classified_news', news[:5])
         news_summary = "\n".join([
@@ -453,6 +493,8 @@ class AgentOrchestrator:
             'metrics_history': risk_summary['metrics_history'],
             'capital_advice': capital_advice.to_dict(),
             'anomalies': anomalies,
+            'correlation_matrix': correlation_matrix,
+            'correlation_warnings': [w['warning'] for w in corr_warnings],
             'news_count': len(news),
             'execution_log': self.execution_log,
         }

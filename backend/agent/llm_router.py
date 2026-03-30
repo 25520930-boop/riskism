@@ -125,6 +125,108 @@ class LLMRouter:
         print(f"[LLMRouter] JSON parse failed after retry. Raw: {result_text[:200]}")
         return fallback or {}
 
+    def _is_mock_payload(self, payload: Dict) -> bool:
+        return isinstance(payload, dict) and any(
+            isinstance(value, str) and '[Mock]' in value
+            for value in payload.values()
+        )
+
+    def _heuristic_sentiment(self, title: str, summary: str) -> Dict:
+        text = f"{title} {summary}".lower()
+        score = 0.0
+        matched = []
+
+        positive_keywords = {
+            'tăng trưởng': 0.35,
+            'lãi': 0.25,
+            'lợi nhuận': 0.25,
+            'mua ròng': 0.35,
+            'bứt phá': 0.30,
+            'hồi phục': 0.25,
+            'mở rộng': 0.20,
+            'kỷ lục': 0.30,
+            'tích cực': 0.20,
+            'nâng hạng': 0.40,
+            'giải ngân': 0.20,
+            'ký hợp đồng': 0.20,
+        }
+        negative_keywords = {
+            'lao dốc': -0.50,
+            'giảm mạnh': -0.35,
+            'sụt giảm': -0.30,
+            'bán ròng': -0.35,
+            'thua lỗ': -0.45,
+            'lỗ': -0.40,
+            'áp lực': -0.20,
+            'rủi ro': -0.20,
+            'điều tra': -0.50,
+            'khởi tố': -0.70,
+            'trái phiếu': -0.15,
+            'thanh tra': -0.35,
+            'siết': -0.20,
+            'suy yếu': -0.25,
+            'thoái vốn': -0.10,
+        }
+
+        for keyword, weight in positive_keywords.items():
+            if keyword in text:
+                score += weight
+                matched.append(keyword)
+        for keyword, weight in negative_keywords.items():
+            if keyword in text:
+                score += weight
+                matched.append(keyword)
+
+        score = max(-0.95, min(0.95, score))
+        if score >= 0.55:
+            label = 'rất tích cực'
+        elif score >= 0.15:
+            label = 'tích cực'
+        elif score > -0.15:
+            label = 'trung tính'
+        elif score > -0.55:
+            label = 'tiêu cực'
+        else:
+            label = 'rất tiêu cực'
+
+        if matched:
+            reasoning = f"Tín hiệu chính: {', '.join(matched[:3])}."
+        else:
+            reasoning = 'Đánh giá theo ngữ cảnh tiêu đề và tóm tắt bài viết.'
+
+        return {
+            'score': round(score, 2),
+            'label': label,
+            'reasoning': reasoning,
+        }
+
+    def _heuristic_news_impact(self, title: str, summary: str, related_symbols: List[str]) -> Dict:
+        text = f"{title} {summary}".lower()
+        impacted_symbols = related_symbols or []
+
+        critical_keywords = ['khởi tố', 'hủy niêm yết', 'vỡ nợ', 'giải chấp', 'điều tra']
+        high_keywords = ['lao dốc', 'thua lỗ', 'lỗ', 'giảm mạnh', 'bán ròng', 'áp lực']
+        medium_keywords = ['lợi nhuận', 'tăng trưởng', 'mua ròng', 'mở rộng', 'huy động', 'thanh khoản']
+
+        if any(keyword in text for keyword in critical_keywords):
+            impact_level = 'critical'
+            explanation = 'Tin có từ khóa sự kiện nghiêm trọng, có thể ảnh hưởng mạnh tới định giá.'
+        elif any(keyword in text for keyword in high_keywords):
+            impact_level = 'high'
+            explanation = 'Tin có tín hiệu biến động lớn hoặc rủi ro đáng kể cho cổ phiếu liên quan.'
+        elif any(keyword in text for keyword in medium_keywords) or impacted_symbols:
+            impact_level = 'medium'
+            explanation = 'Tin có khả năng ảnh hưởng đáng chú ý đến tâm lý thị trường hoặc doanh nghiệp liên quan.'
+        else:
+            impact_level = 'low'
+            explanation = 'Tin mang tính tham khảo, tác động ngắn hạn dự kiến thấp.'
+
+        return {
+            'impact_level': impact_level,
+            'affected_symbols': impacted_symbols,
+            'explanation': explanation,
+        }
+
     def score_sentiment(self, title: str, summary: str) -> Dict:
         """
         Score sentiment of a news article.
@@ -136,6 +238,11 @@ class LLMRouter:
             self._cache_hits += 1
             return cached
         self._cache_misses += 1
+
+        if not self.client:
+            result = self._heuristic_sentiment(title, summary)
+            self._cache.set(cache_key, result)
+            return result
 
         system = (
             "Bạn là chuyên gia phân tích sentiment tin tức tài chính Việt Nam. "
@@ -155,6 +262,8 @@ Trả lời JSON (KHÔNG markdown):
             fallback={'score': 0.0, 'label': 'trung tính', 'reasoning': 'Không thể phân tích'},
             model_tier="fast"
         )
+        if self._is_mock_payload(result):
+            result = self._heuristic_sentiment(title, summary)
         self._cache.set(cache_key, result)
         return result
 
@@ -163,6 +272,9 @@ Trả lời JSON (KHÔNG markdown):
         Classify impact level of news on specific stocks.
         Returns: {'impact_level': str, 'affected_symbols': list, 'explanation': str}
         """
+        if not self.client:
+            return self._heuristic_news_impact(title, summary, related_symbols)
+
         system = (
             "Bạn là chuyên gia đánh giá tác động tin tức đến giá cổ phiếu Việt Nam. "
             "Phân loại mức độ ảnh hưởng: low, medium, high, critical."
@@ -177,7 +289,7 @@ Mã liên quan: {symbols_str}
 Trả lời JSON (KHÔNG markdown):
 {{"impact_level": "<low/medium/high/critical>", "affected_symbols": [<list>], "explanation": "<giải thích>"}}"""
 
-        return self._call_gemini_json(
+        result = self._call_gemini_json(
             prompt, system,
             fallback={
                 'impact_level': 'low',
@@ -185,6 +297,9 @@ Trả lời JSON (KHÔNG markdown):
                 'explanation': 'Không thể đánh giá tác động'
             }
         )
+        if self._is_mock_payload(result):
+            return self._heuristic_news_impact(title, summary, related_symbols)
+        return result
 
     def generate_insight(
         self,

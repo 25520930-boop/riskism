@@ -138,6 +138,11 @@ class RiskismApp {
         }
         if (tab === 'risk-analysis' && this.portfolioData) {
             UI.renderRiskAnalysis(this.portfolioData.stock_risks, this.portfolioData.anomalies || []);
+            UI.renderRiskNetworkMap(
+                this.portfolioData.correlation_matrix || {},
+                this.portfolioData.stock_risks || {},
+                this.portfolioData.correlation_warnings || []
+            );
         }
     }
 
@@ -222,11 +227,15 @@ class RiskismApp {
         const portfolio = r.portfolio || (this.portfolioData ? this.portfolioData.portfolio : api.getDemoPortfolio());
         const stockRisks = r.risk_metrics || r.stock_risks || {};
         UI.updateHoldings(portfolio.holdings, stockRisks);
+        window._cachedPortfolioSymbols = (portfolio.holdings || []).map(h => h.symbol);
 
         // Risk Analysis (always populate)
-        if (r.risk_metrics) {
-            UI.renderRiskAnalysis(r.risk_metrics, r.anomalies || []);
-        }
+        UI.renderRiskAnalysis(stockRisks, r.anomalies || []);
+        UI.renderRiskNetworkMap(
+            r.correlation_matrix || this.portfolioData?.correlation_matrix || {},
+            stockRisks,
+            r.correlation_warnings || this.portfolioData?.correlation_warnings || []
+        );
 
         // Reports
         if (r.insight) UI.renderReport(r.insight);
@@ -238,14 +247,23 @@ class RiskismApp {
 
         // Portfolio
         if (r.portfolio_metrics && r.capital_advice) {
+            const previous = this.portfolioData || {};
             const pData = {
+                ...previous,
                 portfolio: portfolio,
                 portfolio_metrics: r.portfolio_metrics,
                 capital_advice: r.capital_advice,
                 stock_risks: stockRisks,
+                anomalies: r.anomalies || previous.anomalies || [],
+                correlation_matrix: r.correlation_matrix || previous.correlation_matrix || {},
+                correlation_warnings: r.correlation_warnings || previous.correlation_warnings || [],
+                portfolio_risk: r.portfolio_risk || previous.portfolio_risk,
+                metrics_history: r.metrics_history || previous.metrics_history,
             };
             this.portfolioData = pData;
             UI.renderPortfolio(pData);
+            UI.setNotifications(pData.anomalies || []);
+            this.refreshNewsForCurrentPortfolio();
         }
     }
 
@@ -260,7 +278,7 @@ class RiskismApp {
                     ? window._cachedNews
                     : [];
                 if (articles.length === 0) {
-                    UI.toast('News đang load, thử lại sau vài giây', 'info');
+                    UI.renderNewsEmpty('Chưa có tin tức realtime phù hợp.');
                     return;
                 }
                 UI.filterAndRenderNews(articles, tab);
@@ -275,6 +293,11 @@ class RiskismApp {
                           (this.agentResult && (this.agentResult.risk_metrics || this.agentResult.stock_risks));
             if (risks) {
                 UI.renderStockDetail(e.target.value, risks);
+                UI.renderRiskNetworkMap(
+                    this.portfolioData?.correlation_matrix || this.agentResult?.correlation_matrix || {},
+                    risks,
+                    this.portfolioData?.correlation_warnings || this.agentResult?.correlation_warnings || []
+                );
             }
         });
 
@@ -500,7 +523,10 @@ class RiskismApp {
     }
 
     refreshNewsForCurrentPortfolio() {
-        if (!window._cachedNews || window._cachedNews.length === 0) return;
+        if (!window._cachedNews || window._cachedNews.length === 0) {
+            UI.renderNewsEmpty('Chưa có tin tức realtime phù hợp.');
+            return;
+        }
         UI.filterAndRenderNews(window._cachedNews, this.getActiveNewsFilter());
     }
 
@@ -536,7 +562,7 @@ class RiskismApp {
         }
 
         UI.renderRiskAnalysis(stockRisks, anomalies);
-        UI.renderCorrelationMatrix(port?.correlation_matrix || {}, port?.correlation_warnings || []);
+        UI.renderRiskNetworkMap(port?.correlation_matrix || {}, stockRisks, port?.correlation_warnings || []);
         UI.renderPortfolio(port);
         UI.setNotifications(anomalies);
         this.refreshNewsForCurrentPortfolio();
@@ -549,15 +575,13 @@ class RiskismApp {
         // Load news
         this._fetchWithTimeout(api.getNews(), this.API_TIMEOUT)
             .then(news => {
-                if (news && news.articles) {
-                    window._cachedNews = news.articles;  // Cache để filter sau
-                    UI.renderNews(news.articles);
-                }
+                window._cachedNews = news?.articles || [];
+                this.refreshNewsForCurrentPortfolio();
             })
             .catch(e => {
                 console.warn('[Dashboard] News load failed:', e.message);
-                const demoNews = api.getDemoNews();
-                if (demoNews) UI.renderNews(demoNews.articles);
+                window._cachedNews = [];
+                UI.renderNewsEmpty('Không tải được tin tức realtime lúc này.');
             });
 
         // Load portfolio risk (contains ALL real data)

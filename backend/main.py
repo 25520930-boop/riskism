@@ -601,17 +601,12 @@ FALLBACK_NEWS = [
 @app.get("/api/news/latest")
 async def get_latest_news(limit: int = Query(default=20, le=50)):
     """Get latest news with sentiment scores."""
-    news = agent.state.get('scored_news', [])
-    if not news:
-        raw_news = await agent.tool_fetch_news()
-        if raw_news:
-            news = await agent.tool_score_sentiment_batch(raw_news[:limit])
-    # Fallback demo news if RSS is down
-    if not news:
-        news = FALLBACK_NEWS
+    raw_news = await agent.tool_fetch_news()
+    total = len(raw_news)
+    news = await agent.tool_score_sentiment_batch(raw_news[:limit]) if raw_news else []
     return {
-        'articles': news[:limit],
-        'total': len(news),
+        'articles': news,
+        'total': total,
         'fetched_at': datetime.now().isoformat(),
     }
 

@@ -5,10 +5,12 @@ Crawls financial news from CafeF and Vietstock RSS feeds.
 import feedparser
 import hashlib
 import httpx
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 import json
+import re
+import unicodedata
 import redis
 from backend.config import get_settings
 
@@ -37,17 +39,76 @@ class NewsArticle:
 
 # RSS Feed URLs for Vietnamese financial news (Multi-source with fallback)
 RSS_FEEDS = {
-    # Primary: CafeF
-    'cafef_stock': 'https://cafef.vn/rss/chung-khoan.rss',
-    'cafef_market': 'https://cafef.vn/rss/thi-truong.rss',
-    'cafef_enterprise': 'https://cafef.vn/rss/doanh-nghiep.rss',
-    'cafef_macro': 'https://cafef.vn/rss/kinh-te-vi-mo.rss',
+    # Primary: CafeF + Vietstock official RSS pages
+    'cafef_stock': 'https://cafef.vn/thi-truong-chung-khoan.rss',
+    'cafef_home': 'https://cafef.vn/home.rss',
+    'vietstock_stock': 'https://vietstock.vn/830/chung-khoan/co-phieu.rss',
+    'vietstock_analysis': 'https://vietstock.vn/1636/nhan-dinh-phan-tich/nhan-dinh-thi-truong.rss',
+    'vietstock_macro': 'https://vietstock.vn/761/kinh-te/vi-mo.rss',
+    'vietstock_enterprise': 'https://vietstock.vn/737/doanh-nghiep/hoat-dong-kinh-doanh.rss',
     # Backup: VNExpress
     'vnexpress_business': 'https://vnexpress.net/rss/kinh-doanh.rss',
-    'vnexpress_stock': 'https://vnexpress.net/rss/chung-khoan.rss',
-    # Backup: Thanh Nien
-    'thanhnien_finance': 'https://thanhnien.vn/rss/tai-chinh-kinh-doanh.rss',
 }
+
+MARKET_SOURCES = {
+    'cafef_stock',
+    'vietstock_stock',
+    'vietstock_analysis',
+    'vietstock_macro',
+}
+
+MARKET_KEYWORDS = [
+    'THI TRUONG CHUNG KHOAN',
+    'CHUNG KHOAN',
+    'VNINDEX',
+    'VN-INDEX',
+    'VN30',
+    'HOSE',
+    'HNX',
+    'UPCOM',
+    'KHOI NGOAI',
+    'THANH KHOAN',
+    'DONG TIEN',
+    'AP LUC BAN',
+    'CHOT LOI',
+]
+
+MACRO_FINANCE_KEYWORDS = [
+    'LAI SUAT',
+    'TY GIA',
+    'LAM PHAT',
+    'VI MO',
+    'NGAN HANG NHA NUOC',
+    'ROOM TIN DUNG',
+    'TRAI PHIEU',
+]
+
+VIETNAM_MARKET_HINTS = [
+    'VIET NAM',
+    'VNINDEX',
+    'VN-INDEX',
+    'VN30',
+    'HOSE',
+    'HNX',
+    'UPCOM',
+    'NGAN HANG NHA NUOC',
+    'KHOI NGOAI',
+]
+
+FOREIGN_MARKET_HINTS = [
+    'MY',
+    'HOA KY',
+    'PHO WALL',
+    'WALL STREET',
+    'NASDAQ',
+    'DOW JONES',
+    'S&P 500',
+    'TRUNG QUOC',
+    'NHAT BAN',
+    'HAN QUOC',
+    'CHAU AU',
+    'FEDERAL RESERVE',
+]
 
 
 class RSSFetcher:
@@ -68,6 +129,14 @@ class RSSFetcher:
             self.redis_client = None
         self._memory_cache = {}
 
+    def _normalize_text(self, text: str) -> str:
+        normalized = unicodedata.normalize('NFD', text or '')
+        normalized = ''.join(ch for ch in normalized if unicodedata.category(ch) != 'Mn')
+        return normalized.upper()
+
+    def _sort_symbols(self, symbols: List[str]) -> List[str]:
+        return sorted(set(symbols), key=lambda symbol: (symbol != 'VNINDEX', symbol))
+
     def _parse_date(self, date_str: str) -> Optional[datetime]:
         """Parse various date formats from RSS feeds."""
         formats = [
@@ -78,7 +147,10 @@ class RSSFetcher:
         ]
         for fmt in formats:
             try:
-                return datetime.strptime(date_str, fmt)
+                parsed = datetime.strptime(date_str, fmt)
+                if parsed.tzinfo is not None:
+                    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                return parsed
             except (ValueError, TypeError):
                 continue
         return None
@@ -91,7 +163,11 @@ class RSSFetcher:
         """Fetch and parse a single RSS feed."""
         articles = []
         try:
-            feed = feedparser.parse(feed_url)
+            headers = {'User-Agent': 'Mozilla/5.0 Riskism/1.0'}
+            with httpx.Client(follow_redirects=True, headers=headers, timeout=15.0) as client:
+                response = client.get(feed_url)
+                response.raise_for_status()
+                feed = feedparser.parse(response.text)
             
             for entry in feed.entries[:20]:  # Limit to 20 latest
                 url = entry.get('link', '')
@@ -128,7 +204,7 @@ class RSSFetcher:
 
     def fetch_all_news(self) -> List[NewsArticle]:
         """Fetch news from all configured RSS feeds with Redis Caching."""
-        cache_key = "rss:all_news"
+        cache_key = "rss:all_news:v2"
         
         # 1. Try Memory Cache
         if cache_key in self._memory_cache:
@@ -157,6 +233,7 @@ class RSSFetcher:
                 print(f"[RSSFetcher] Redis cache read error: {e}")
 
         # 3. Fetch Fresh Data
+        self.seen_hashes = set()
         all_articles = []
         for source_name, feed_url in RSS_FEEDS.items():
             articles = self.fetch_feed(feed_url, source_name)
@@ -185,24 +262,29 @@ class RSSFetcher:
         Extract stock symbols mentioned in news.
         Simple keyword matching for Vietnamese stock tickers.
         """
-        text = f"{title} {summary}".upper()
+        text = self._normalize_text(f"{title} {summary}")
         
         # Common Vietnamese stock symbols
         known_symbols = [
             'VCB', 'BID', 'CTG', 'TCB', 'ACB', 'MBB', 'VPB', 'HDB',
-            'STB', 'TPB', 'SHB', 'LPB', 'VIC', 'VHM', 'VRE', 'NVL',
-            'DXG', 'KDH', 'MSN', 'MWG', 'VNM', 'SAB', 'PNJ', 'FRT',
+            'STB', 'TPB', 'SHB', 'LPB', 'VIB', 'EIB', 'OCB', 'SSB',
+            'VIC', 'VHM', 'VRE', 'NVL', 'DXG', 'KDH', 'DIG', 'PDR', 'NLG',
+            'MSN', 'MWG', 'VNM', 'SAB', 'PNJ', 'FRT', 'DGW',
             'HPG', 'HSG', 'NKG', 'GAS', 'PLX', 'POW', 'PPC', 'FPT',
-            'CMG', 'VNR', 'BVH', 'VCG', 'CTD', 'HBC', 'GMD', 'PVT',
-            'DGC', 'DCM', 'SSI', 'VND', 'HCM', 'VCI',
+            'CMG', 'VNR', 'BVH', 'VCG', 'CTD', 'HBC', 'GMD', 'PVT', 'GEX',
+            'DGC', 'DCM', 'DPM', 'SSI', 'VND', 'HCM', 'VCI', 'VIX',
+            'BCM', 'IDC', 'REE', 'HAG', 'HNG', 'CEO', 'BAB', 'BVB', 'VVS', 'KBC',
         ]
         
         # Also match company names
         name_map = {
             'VIETCOMBANK': 'VCB', 'BIDV': 'BID', 'VIETINBANK': 'CTG',
             'TECHCOMBANK': 'TCB', 'VINGROUP': 'VIC', 'VINHOMES': 'VHM',
-            'VINAMILK': 'VNM', 'MASAN': 'MSN', 'HOA PHAT': 'HPG',
-            'FPT': 'FPT', 'PETROLIMEX': 'PLX', 'SABECO': 'SAB',
+            'VINCOM RETAIL': 'VRE', 'NOVALAND': 'NVL', 'VINAMILK': 'VNM',
+            'MASAN': 'MSN', 'HOA PHAT': 'HPG', 'FPT': 'FPT',
+            'PETROLIMEX': 'PLX', 'SABECO': 'SAB', 'VPBANK': 'VPB',
+            'VIETJET': 'VJC', 'VIETJET AIR': 'VJC', 'DIGIWORLD': 'DGW',
+            'KINH BAC': 'KBC', 'BVBANK': 'BVB', 'BAC A BANK': 'BAB',
             'THE GIOI DI DONG': 'MWG', 'MOBILE WORLD': 'MWG',
             'VN-INDEX': 'VNINDEX', 'VNINDEX': 'VNINDEX',
         }
@@ -210,11 +292,51 @@ class RSSFetcher:
         found = set()
         
         for symbol in known_symbols:
-            if f' {symbol} ' in f' {text} ' or f'({symbol})' in text:
+            if symbol == 'HCM' and any(marker in text for marker in ['TPHCM', 'TP.HCM', 'TP HCM', 'HO CHI MINH']):
+                continue
+            pattern = rf'(?<![A-Z0-9]){re.escape(symbol)}(?![A-Z0-9])'
+            if re.search(pattern, text):
                 found.add(symbol)
         
         for name, symbol in name_map.items():
             if name in text:
                 found.add(symbol)
 
-        return list(found)
+        return self._sort_symbols(list(found))
+
+    def classify_article(self, title: str, summary: str, source: str, related_symbols: List[str]) -> Dict:
+        """
+        Classify whether an article belongs to market news, company news, or both.
+        """
+        text = self._normalize_text(f"{title} {summary}")
+        symbols = set(related_symbols or [])
+        scopes = set()
+
+        company_symbols = {symbol for symbol in symbols if symbol != 'VNINDEX'}
+        market_signal = (
+            source in MARKET_SOURCES
+            or any(keyword in text for keyword in MARKET_KEYWORDS)
+            or (
+                any(keyword in text for keyword in MACRO_FINANCE_KEYWORDS)
+                and any(hint in text for hint in VIETNAM_MARKET_HINTS)
+            )
+        )
+        foreign_only_signal = (
+            any(hint in text for hint in FOREIGN_MARKET_HINTS)
+            and not company_symbols
+            and not any(hint in text for hint in VIETNAM_MARKET_HINTS)
+        )
+        if foreign_only_signal:
+            market_signal = False
+
+        if market_signal:
+            scopes.add('market')
+            symbols.add('VNINDEX')
+
+        if company_symbols:
+            scopes.add('company')
+
+        return {
+            'related_symbols': self._sort_symbols(list(symbols)),
+            'news_scope': sorted(scopes),
+        }
