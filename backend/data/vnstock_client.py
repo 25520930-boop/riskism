@@ -192,6 +192,51 @@ class VnstockClient:
             print(f"[VnstockClient] VN-Index error: {e}")
             return None
 
+    def get_market_index_snapshot(self) -> Optional[Dict]:
+        """Get latest VN-Index snapshot with short cache for ticker usage."""
+        cache_key = "vnindex:snapshot"
+        cached = self._get_cache(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        if not VNSTOCK_AVAILABLE:
+            return None
+
+        try:
+            stock = Vnstock().stock(symbol='VNINDEX', source='VCI')
+            end_date = datetime.now().strftime('%Y-%m-%d')
+            start_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+            df = stock.quote.history(start=start_date, end=end_date, interval='1D')
+
+            if df is None or df.empty or 'close' not in df.columns:
+                return None
+
+            close_series = df['close'].dropna()
+            if close_series.empty:
+                return None
+
+            latest_close = float(close_series.iloc[-1])
+            previous_close = float(close_series.iloc[-2]) if len(close_series) > 1 else latest_close
+            volume_series = df['volume'].dropna() if 'volume' in df.columns else None
+            latest_volume = int(volume_series.iloc[-1]) if volume_series is not None and not volume_series.empty else 0
+            change = latest_close - previous_close
+
+            result = {
+                'symbol': 'VNINDEX',
+                'price': latest_close,
+                'previous_close': previous_close,
+                'change': round(change, 2),
+                'change_pct': round((change / previous_close) * 100, 2) if previous_close > 0 else 0,
+                'volume': latest_volume,
+                'timestamp': datetime.now().isoformat(),
+            }
+            self._set_cache(cache_key, json.dumps(result), 30)
+            return result
+
+        except Exception as e:
+            print(f"[VnstockClient] VN-Index snapshot error: {e}")
+            return None
+
     # ─── Async Wrappers ──────────────────────────────
 
     async def get_historical_data_async(self, symbol: str, days: int = 180) -> Optional[Dict]:
@@ -201,6 +246,10 @@ class VnstockClient:
     async def get_market_index_async(self, days: int = 180) -> Optional[Dict]:
         """Async wrapper for VN-Index."""
         return await asyncio.to_thread(self.get_market_index, days)
+
+    async def get_market_index_snapshot_async(self) -> Optional[Dict]:
+        """Async wrapper for latest VN-Index snapshot."""
+        return await asyncio.to_thread(self.get_market_index_snapshot)
 
     async def fetch_multiple_async(self, symbols: List[str], days: int = 180) -> Dict:
         """Fetch data for multiple symbols + VNINDEX concurrently."""

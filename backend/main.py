@@ -231,10 +231,43 @@ async def login(request: LoginRequest):
 
 
 # --- Market Data ---
+def _build_vnindex_snapshot(index_data: Optional[dict]) -> Optional[dict]:
+    """Build a latest-price style snapshot for VNINDEX from recent closes."""
+    if not index_data:
+        return None
+
+    closes = index_data.get('close') or []
+    if not closes:
+        return None
+
+    latest_close = float(closes[-1])
+    previous_close = float(closes[-2]) if len(closes) > 1 else latest_close
+    change = latest_close - previous_close
+    volume_series = index_data.get('volume') or []
+    latest_volume = int(volume_series[-1]) if volume_series else 0
+
+    return {
+        'symbol': 'VNINDEX',
+        'price': latest_close,
+        'previous_close': previous_close,
+        'open': previous_close,
+        'high': latest_close,
+        'low': latest_close,
+        'volume': latest_volume,
+        'change': round(change, 2),
+        'change_pct': round((change / previous_close) * 100, 2) if previous_close > 0 else 0,
+        'timestamp': datetime.now().isoformat(),
+    }
+
+
 @app.get("/api/market/{symbol}")
 async def get_market_data(symbol: str, days: int = Query(default=180, le=365)):
     """Get historical market data for a symbol."""
-    data = await vnstock.get_historical_data_async(symbol.upper(), days)
+    symbol = symbol.upper()
+    if symbol == 'VNINDEX':
+        data = await vnstock.get_market_index_async(days)
+    else:
+        data = await vnstock.get_historical_data_async(symbol, days)
     if not data:
         raise HTTPException(status_code=404, detail=f"No data found for {symbol}")
     return data
@@ -252,7 +285,14 @@ async def get_stock_risk(symbol: str):
 @app.get("/api/market/{symbol}/price")
 async def get_latest_price(symbol: str):
     """Get latest intraday price."""
-    data = await asyncio.to_thread(vnstock.get_intraday_price, symbol.upper())
+    symbol = symbol.upper()
+    if symbol == 'VNINDEX':
+        data = await vnstock.get_market_index_snapshot_async()
+        if not data:
+            index_data = await vnstock.get_market_index_async(days=2)
+            data = _build_vnindex_snapshot(index_data)
+    else:
+        data = await asyncio.to_thread(vnstock.get_intraday_price, symbol)
     if not data:
         raise HTTPException(status_code=404, detail=f"No price data for {symbol}")
     return data

@@ -143,8 +143,12 @@ const UI = {
         const keys = Object.keys(prices);
         container.innerHTML = keys.slice(0, 5).map(symbol => {
             const p = prices[symbol];
-            const cls = p.change_pct > 0 ? 'up' : p.change_pct < 0 ? 'down' : 'neutral';
-            return `<div class="ticker-chip ${cls}"><span class="ticker-name">${symbol}</span><span class="ticker-val">${p.change_pct > 0 ? '+' : ''}${p.change_pct}%</span></div>`;
+            const changePct = Number(p?.change_pct);
+            const hasChange = Number.isFinite(changePct);
+            const cls = !hasChange ? 'neutral' : changePct > 0 ? 'up' : changePct < 0 ? 'down' : 'neutral';
+            const value = hasChange ? `${changePct > 0 ? '+' : ''}${changePct.toFixed(2)}%` : '—';
+            const label = p?.display_name || symbol;
+            return `<div class="ticker-chip ${cls}"><span class="ticker-name">${label}</span><span class="ticker-val">${value}</span></div>`;
         }).join('');
     },
 

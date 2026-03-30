@@ -70,6 +70,35 @@ class RiskismAPI {
         return await this.get(`/api/market/${symbol}/price`);
     }
 
+    async getMarketIndexSnapshot() {
+        const live = await this.getLatestPrice('VNINDEX');
+        if (live && Number.isFinite(Number(live.change_pct))) {
+            return live;
+        }
+
+        const history = await this.get('/api/market/VNINDEX?days=2');
+        const closes = history?.close || [];
+        if (!Array.isArray(closes) || closes.length === 0) {
+            return null;
+        }
+
+        const latest = Number(closes[closes.length - 1]);
+        const previous = Number(closes[closes.length - 2] ?? closes[closes.length - 1]);
+        if (!Number.isFinite(latest) || !Number.isFinite(previous)) {
+            return null;
+        }
+
+        const change = latest - previous;
+        return {
+            symbol: 'VNINDEX',
+            price: latest,
+            previous_close: previous,
+            change: Number(change.toFixed(2)),
+            change_pct: previous > 0 ? Number(((change / previous) * 100).toFixed(2)) : 0,
+            timestamp: new Date().toISOString(),
+        };
+    }
+
     // ─── Portfolio ───────────────────────────────────────
 
     async getPortfolio(userId) {

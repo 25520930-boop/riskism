@@ -35,7 +35,7 @@ class RiskismApp {
         this.bindLogout();
         this.bindKeyboardShortcuts();
         this.startClock();
-        this.startTickerDemo();
+        this.loadMarketTicker();
 
         // Show user identity
         const nameEl = document.getElementById('user-display-name');
@@ -360,6 +360,8 @@ class RiskismApp {
 
     // ─── Data Loaders ────────────────────────────
     async loadAllData() {
+        this.loadMarketTicker();
+
         // Load news
         this._fetchWithTimeout(api.getNews(), this.API_TIMEOUT)
             .then(news => {
@@ -407,6 +409,34 @@ class RiskismApp {
 
     // ─── Utilities ───────────────────────────────
 
+    async loadMarketTicker() {
+        try {
+            const snapshot = await this._fetchWithTimeout(
+                api.getMarketIndexSnapshot(),
+                this.API_TIMEOUT
+            );
+
+            if (snapshot && Number.isFinite(Number(snapshot.change_pct))) {
+                UI.updateTicker({
+                    VNINDEX: {
+                        display_name: 'VN-INDEX',
+                        change_pct: Number(snapshot.change_pct),
+                    },
+                });
+                return;
+            }
+        } catch (e) {
+            console.warn('[Dashboard] VN-Index load failed:', e.message);
+        }
+
+        UI.updateTicker({
+            VNINDEX: {
+                display_name: 'VN-INDEX',
+                change_pct: null,
+            },
+        });
+    }
+
     _fetchWithTimeout(promise, ms) {
         return Promise.race([
             promise,
@@ -447,21 +477,6 @@ class RiskismApp {
         const isOpen = isWeekday && mins >= 540 && mins < 900; // 9:00 - 15:00
         el.textContent = isOpen ? '🟢 OPEN' : '🔴 CLOSED';
         el.className = `market-status ${isOpen ? 'open' : 'closed'}`;
-    }
-
-    startTickerDemo() {
-        const bases = { 'VN-INDEX': 1.2 };
-        const update = () => {
-            const prices = {};
-            Object.entries(bases).forEach(([sym, base]) => {
-                const drift = (Math.random() - 0.5) * 0.3;
-                bases[sym] = +(base + drift).toFixed(1);
-                prices[sym] = { change_pct: bases[sym] };
-            });
-            UI.updateTicker(prices);
-        };
-        update();
-        this.tickerInterval = setInterval(update, 5000);
     }
 
     // ─── Keyboard Shortcuts ──────────────────
