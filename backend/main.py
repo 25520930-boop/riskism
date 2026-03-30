@@ -7,6 +7,9 @@ import json
 import asyncio
 import time as _time
 import re
+import hmac
+import hashlib
+import secrets
 from collections import defaultdict
 from datetime import datetime
 from typing import List, Optional
@@ -25,6 +28,11 @@ from backend.data.vnstock_client import VnstockClient
 from backend.firebase_auth import get_firebase_public_config, verify_firebase_id_token
 
 settings = get_settings()
+
+PASSWORD_ITERATIONS = 310000
+PASSWORD_MIN_LENGTH = 8
+LOCAL_USERNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{1,30}[a-z0-9])?$")
+DEMO_USER_PASSWORD_HASH = "pbkdf2_sha256$310000$9c3f4ec51f8ae5ff27b1e978df3f98b0$e623f55994dab0705f4080292443eb20a0dbc2292fd62a675aafb4cdffe0bb0a"
 
 # Global instances
 agent = AgentOrchestrator()
@@ -202,10 +210,27 @@ async def health_check():
 # --- Auth ---
 class LoginRequest(BaseModel):
     username: str
+    password: str
+
+class SignupRequest(BaseModel):
+    username: str
+    password: str
 
 class FirebaseLoginRequest(BaseModel):
     id_token: str
     username_hint: Optional[str] = None
+
+def _ensure_local_auth_columns(db):
+    db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT"))
+    db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(255)"))
+    db.execute(
+        text(
+            "UPDATE users "
+            "SET password_hash = :password_hash, updated_at = NOW() "
+            "WHERE username = 'demo_user' AND password_hash IS NULL"
+        ),
+        {"password_hash": DEMO_USER_PASSWORD_HASH},
+    )
 
 def _ensure_firebase_user_columns(db):
     db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(255)"))
@@ -213,6 +238,51 @@ def _ensure_firebase_user_columns(db):
     db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT"))
     db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid ON users(firebase_uid) WHERE firebase_uid IS NOT NULL"))
     db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL"))
+
+def _normalize_local_username(value: str) -> str:
+    return (value or "").strip().lower()
+
+def _validate_local_username(value: str) -> str:
+    username = _normalize_local_username(value)
+    if not LOCAL_USERNAME_RE.fullmatch(username):
+        raise HTTPException(
+            status_code=400,
+            detail="Use 3-32 lowercase letters, numbers, dots, underscores, or hyphens.",
+        )
+    return username
+
+def _validate_local_password(password: str) -> str:
+    if len(password or "") < PASSWORD_MIN_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Use at least {PASSWORD_MIN_LENGTH} characters for your password.",
+        )
+    return password
+
+def _hash_password(password: str, salt: Optional[bytes] = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        PASSWORD_ITERATIONS,
+    )
+    return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+def _verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        algorithm, iterations, salt_hex, digest_hex = stored_hash.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        candidate = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            bytes.fromhex(salt_hex),
+            int(iterations),
+        )
+        return hmac.compare_digest(candidate.hex(), digest_hex)
+    except Exception:
+        return False
 
 def _slugify_username(value: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9_]+", "_", (value or "").strip().lower())
@@ -249,33 +319,126 @@ def _ensure_unique_username(db, base_username: str) -> str:
 
 @app.post("/api/auth/login")
 async def login(request: LoginRequest):
-    """Simple demo login/signup."""
-    username = request.username.strip()
-    if not username:
-        raise HTTPException(status_code=400, detail="Username required")
-        
+    """Authenticate a local account using username + password."""
+    username = _validate_local_username(request.username)
+    password = _validate_local_password(request.password)
+
     db = SyncSessionLocal()
     try:
-        # Check if user exists
-        user_query = text("SELECT id, username, capital_amount FROM users WHERE username = :u")
+        _ensure_local_auth_columns(db)
+        db.commit()
+        user_query = text(
+            "SELECT id, username, capital_amount, password_hash, firebase_uid "
+            "FROM users WHERE username = :u"
+        )
         user = db.execute(user_query, {"u": username}).fetchone()
-        
+
         if not user:
-            # Create new user
-            insert_q = text(
-                "INSERT INTO users (username, risk_appetite, capital_amount) "
-                "VALUES (:u, 'moderate', 0) RETURNING id"
+            raise HTTPException(status_code=404, detail="Account not found. Create an account to get started.")
+
+        if user[4]:
+            raise HTTPException(
+                status_code=409,
+                detail="This username is linked to Google sign-in. Use Google to continue.",
             )
-            result = db.execute(insert_q, {"u": username})
-            user_id = result.fetchone()[0]
-            db.commit()
-            return {"user_id": user_id, "username": username, "capital_amount": 0, "is_new": True}
-        
-        return {"user_id": user[0], "username": user[1], "capital_amount": user[2], "is_new": False}
+
+        if not user[3]:
+            raise HTTPException(
+                status_code=409,
+                detail="This account does not have a password yet. Create it again to finish setup.",
+            )
+
+        if not _verify_password(password, user[3]):
+            raise HTTPException(status_code=401, detail="Incorrect password.")
+
+        return {
+            "user_id": user[0],
+            "username": user[1],
+            "capital_amount": user[2],
+            "is_new": False,
+            "auth_provider": "local",
+            "display_name": user[1],
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
-        print(f"[AUTH FALLBACK] DB error, using mock login: {e}")
-        return {"user_id": 1, "username": username, "capital_amount": 20000000, "is_new": False}
+        print(f"[AUTH] Local login failed: {e}")
+        raise HTTPException(status_code=500, detail="Unable to sign in right now.")
+    finally:
+        db.close()
+
+@app.post("/api/auth/signup")
+async def signup(request: SignupRequest):
+    """Create a local account using username + password."""
+    username = _validate_local_username(request.username)
+    password = _validate_local_password(request.password)
+
+    db = SyncSessionLocal()
+    try:
+        _ensure_local_auth_columns(db)
+        db.commit()
+
+        user_query = text(
+            "SELECT id, username, capital_amount, password_hash, firebase_uid "
+            "FROM users WHERE username = :u"
+        )
+        existing_user = db.execute(user_query, {"u": username}).fetchone()
+
+        if existing_user and existing_user[4]:
+            raise HTTPException(
+                status_code=409,
+                detail="This username is reserved by a Google account. Choose another username.",
+            )
+
+        password_hash = _hash_password(password)
+
+        if existing_user and existing_user[3]:
+            raise HTTPException(status_code=409, detail="Username already exists. Sign in instead.")
+
+        if existing_user:
+            db.execute(
+                text(
+                    "UPDATE users SET password_hash = :password_hash, updated_at = NOW() "
+                    "WHERE id = :user_id"
+                ),
+                {"password_hash": password_hash, "user_id": existing_user[0]},
+            )
+            db.commit()
+            return {
+                "user_id": existing_user[0],
+                "username": existing_user[1],
+                "capital_amount": existing_user[2],
+                "is_new": False,
+                "auth_provider": "local",
+                "display_name": existing_user[1],
+                "upgraded_legacy": True,
+            }
+
+        result = db.execute(
+            text(
+                "INSERT INTO users (username, password_hash, risk_appetite, capital_amount) "
+                "VALUES (:username, :password_hash, 'moderate', 0) RETURNING id"
+            ),
+            {"username": username, "password_hash": password_hash},
+        )
+        user_id = result.fetchone()[0]
+        db.commit()
+        return {
+            "user_id": user_id,
+            "username": username,
+            "capital_amount": 0,
+            "is_new": True,
+            "auth_provider": "local",
+            "display_name": username,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"[AUTH] Signup failed: {e}")
+        raise HTTPException(status_code=500, detail="Unable to create your account right now.")
     finally:
         db.close()
 
@@ -301,7 +464,9 @@ async def firebase_login(request: FirebaseLoginRequest):
 
     db = SyncSessionLocal()
     try:
+        _ensure_local_auth_columns(db)
         _ensure_firebase_user_columns(db)
+        db.commit()
 
         user = db.execute(
             text(
@@ -409,7 +574,17 @@ def _normalize_stock_price(raw_price: Optional[float]) -> Optional[float]:
 
 
 async def _get_stock_reference_snapshot(symbol: str) -> Optional[dict]:
-    intraday = await asyncio.to_thread(vnstock.get_intraday_price, symbol)
+    intraday = None
+    try:
+        intraday = await asyncio.wait_for(
+            asyncio.to_thread(vnstock.get_intraday_price, symbol),
+            timeout=3.5,
+        )
+    except asyncio.TimeoutError:
+        print(f"[Market] Intraday timeout for {symbol}, falling back to historical close")
+    except Exception as e:
+        print(f"[Market] Intraday snapshot error for {symbol}: {e}")
+
     if intraday and intraday.get('price') is not None:
         price = _normalize_stock_price(intraday.get('price'))
         open_price = _normalize_stock_price(intraday.get('open'))
@@ -428,7 +603,17 @@ async def _get_stock_reference_snapshot(symbol: str) -> Optional[dict]:
             'change': change if change is not None else intraday.get('change'),
         }
 
-    historical = await vnstock.get_historical_data_async(symbol, days=2)
+    historical = None
+    try:
+        historical = await asyncio.wait_for(
+            vnstock.get_historical_data_async(symbol, days=2),
+            timeout=5,
+        )
+    except asyncio.TimeoutError:
+        print(f"[Market] Historical fallback timeout for {symbol}")
+    except Exception as e:
+        print(f"[Market] Historical fallback error for {symbol}: {e}")
+
     closes = historical.get('close', []) if historical else []
     if not closes:
         return None
@@ -495,9 +680,22 @@ async def get_latest_price(symbol: str):
     """Get latest intraday price."""
     symbol = symbol.upper()
     if symbol == 'VNINDEX':
-        data = await vnstock.get_market_index_snapshot_async()
+        try:
+            data = await asyncio.wait_for(
+                vnstock.get_market_index_snapshot_async(),
+                timeout=3.5,
+            )
+        except asyncio.TimeoutError:
+            print("[Market] VNINDEX snapshot timeout, falling back to historical close")
+            data = None
         if not data:
-            index_data = await vnstock.get_market_index_async(days=2)
+            try:
+                index_data = await asyncio.wait_for(
+                    vnstock.get_market_index_async(days=2),
+                    timeout=5,
+                )
+            except asyncio.TimeoutError:
+                index_data = None
             data = _build_vnindex_snapshot(index_data)
     else:
         data = await _get_stock_reference_snapshot(symbol)
@@ -539,28 +737,48 @@ async def update_portfolio(user_id: int, request: PortfolioUpdateRequest):
         for h in request.holdings:
             symbol = h.symbol.upper().strip()
             if symbol and h.quantity > 0:
-                normalized_holdings[symbol] = normalized_holdings.get(symbol, 0) + h.quantity
+                existing = normalized_holdings.get(symbol, {"quantity": 0, "avg_price": None})
+                fallback_price = existing["avg_price"]
+                if h.avg_price is not None and float(h.avg_price) > 0:
+                    fallback_price = float(h.avg_price)
+                normalized_holdings[symbol] = {
+                    "quantity": existing["quantity"] + h.quantity,
+                    "avg_price": fallback_price,
+                }
 
         # Insert new holdings
         if normalized_holdings:
             symbols = list(normalized_holdings.keys())
-            snapshots = await asyncio.gather(
-                *[_get_stock_reference_snapshot(symbol) for symbol in symbols]
-            )
-            for symbol, snapshot in zip(symbols, snapshots):
-                if not snapshot or snapshot.get('price') is None:
+            unresolved_symbols = [
+                symbol for symbol, meta in normalized_holdings.items()
+                if not meta.get("avg_price")
+            ]
+            snapshots_by_symbol = {}
+            if unresolved_symbols:
+                snapshots = await asyncio.gather(
+                    *[_get_stock_reference_snapshot(symbol) for symbol in unresolved_symbols]
+                )
+                snapshots_by_symbol = dict(zip(unresolved_symbols, snapshots))
+
+            for symbol in symbols:
+                snapshot = snapshots_by_symbol.get(symbol)
+                fallback_price = normalized_holdings[symbol]["avg_price"]
+                if snapshot and snapshot.get('price') is not None:
+                    resolved_price = float(snapshot['price'])
+                elif fallback_price is not None and fallback_price > 0:
+                    resolved_price = float(fallback_price)
+                else:
                     raise HTTPException(
                         status_code=400,
                         detail=f"Không lấy được giá hiện tại cho mã {symbol}"
                     )
-                resolved_price = float(snapshot['price'])
                 db.execute(text(
                     "INSERT INTO portfolios (user_id, symbol, quantity, avg_price, sector) "
                     "VALUES (:uid, :sym, :qty, :prc, 'Unknown')"
                 ), {
                     "uid": user_id,
                     "sym": symbol,
-                    "qty": normalized_holdings[symbol],
+                    "qty": normalized_holdings[symbol]["quantity"],
                     "prc": resolved_price
                 })
         
@@ -593,7 +811,7 @@ async def update_portfolio(user_id: int, request: PortfolioUpdateRequest):
 
 @app.get("/api/portfolio/{user_id}")
 async def get_portfolio(user_id: int):
-    return agent.tool_get_portfolio(user_id)
+    return await agent.tool_get_portfolio(user_id)
 
 
 @app.get("/api/portfolio/{user_id}/risk")
@@ -608,7 +826,7 @@ async def get_portfolio_risk(user_id: int):
         calculate_returns, compute_portfolio_risk_summary,
     )
 
-    portfolio = agent.tool_get_portfolio(user_id)
+    portfolio = await agent.tool_get_portfolio(user_id)
     symbols = [h['symbol'] for h in portfolio['holdings']]
 
     # Fetch all data concurrently (fast!)
@@ -738,9 +956,27 @@ FALLBACK_NEWS = [
 @app.get("/api/news/latest")
 async def get_latest_news(limit: int = Query(default=20, le=50)):
     """Get latest news with sentiment scores."""
-    raw_news = await agent.tool_fetch_news()
+    try:
+        raw_news = await asyncio.wait_for(agent.tool_fetch_news(), timeout=8)
+    except Exception as e:
+        print(f"[NEWS] Live fetch fallback: {e}")
+        raw_news = []
+
     total = len(raw_news)
-    news = await agent.tool_score_sentiment_batch(raw_news[:limit]) if raw_news else []
+
+    if raw_news:
+        news = []
+        for article in raw_news[:limit]:
+            item = dict(article)
+            item['sentiment'] = agent.llm._heuristic_sentiment(
+                item.get('title', ''),
+                item.get('summary', ''),
+            )
+            news.append(item)
+    else:
+        news = [dict(article) for article in FALLBACK_NEWS[:limit]]
+        total = len(news)
+
     return {
         'articles': news,
         'total': total,

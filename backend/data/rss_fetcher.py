@@ -1,17 +1,20 @@
 """
 Riskism Data - RSS News Fetcher
-Crawls financial news from CafeF and Vietstock RSS feeds.
+Crawls financial news from Vietnamese RSS feeds and curated market pages.
 """
 import feedparser
 import hashlib
 import httpx
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 import json
 import re
 import unicodedata
+from urllib.parse import urljoin
 import redis
+from bs4 import BeautifulSoup
 from backend.config import get_settings
 
 settings = get_settings()
@@ -50,11 +53,14 @@ RSS_FEEDS = {
     'vnexpress_business': 'https://vnexpress.net/rss/kinh-doanh.rss',
 }
 
+VNEXPRESS_STOCK_URL = 'https://vnexpress.net/kinh-doanh/chung-khoan'
+
 MARKET_SOURCES = {
     'cafef_stock',
     'vietstock_stock',
     'vietstock_analysis',
     'vietstock_macro',
+    'vnexpress_stock',
 }
 
 MARKET_KEYWORDS = [
@@ -159,12 +165,17 @@ class RSSFetcher:
         """Generate hash for deduplication."""
         return hashlib.md5(url.encode()).hexdigest()
 
+    def _sanitize_summary(self, summary: str) -> str:
+        summary = re.sub(r'<[^>]+>', '', summary or '').strip()
+        return re.sub(r'\s+', ' ', summary)[:500].strip()
+
     def fetch_feed(self, feed_url: str, source_name: str) -> List[NewsArticle]:
         """Fetch and parse a single RSS feed."""
         articles = []
         try:
             headers = {'User-Agent': 'Mozilla/5.0 Riskism/1.0'}
-            with httpx.Client(follow_redirects=True, headers=headers, timeout=15.0) as client:
+            timeout = httpx.Timeout(4.0, connect=2.0, read=4.0, write=4.0, pool=2.0)
+            with httpx.Client(follow_redirects=True, headers=headers, timeout=timeout) as client:
                 response = client.get(feed_url)
                 response.raise_for_status()
                 feed = feedparser.parse(response.text)
@@ -172,16 +183,11 @@ class RSSFetcher:
             for entry in feed.entries[:20]:  # Limit to 20 latest
                 url = entry.get('link', '')
                 url_hash = self._hash_url(url)
-                
-                if url_hash in self.seen_hashes:
-                    continue
-                self.seen_hashes.add(url_hash)
 
                 title = entry.get('title', '').strip()
-                summary = entry.get('summary', entry.get('description', '')).strip()
-                # Remove HTML tags from summary
-                import re
-                summary = re.sub(r'<[^>]+>', '', summary).strip()
+                summary = self._sanitize_summary(
+                    entry.get('summary', entry.get('description', '')).strip()
+                )
                 
                 published = self._parse_date(
                     entry.get('published', entry.get('updated', ''))
@@ -202,9 +208,48 @@ class RSSFetcher:
 
         return articles
 
+    def fetch_vnexpress_stock_page(self) -> List[NewsArticle]:
+        """Fetch latest stock-market articles from VNExpress stock page."""
+        articles = []
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0 Riskism/1.0'}
+            timeout = httpx.Timeout(4.0, connect=2.0, read=4.0, write=4.0, pool=2.0)
+            with httpx.Client(follow_redirects=True, headers=headers, timeout=timeout) as client:
+                response = client.get(VNEXPRESS_STOCK_URL)
+                response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            base_time = datetime.now()
+
+            for idx, item in enumerate(soup.select('.item-news')[:24]):
+                title_el = item.select_one('.title-news a')
+                if not title_el:
+                    continue
+
+                title = title_el.get_text(' ', strip=True)
+                url = urljoin(VNEXPRESS_STOCK_URL, title_el.get('href', '').strip())
+                if not title or not url:
+                    continue
+
+                summary_el = item.select_one('.description a') or item.select_one('.description')
+                summary = self._sanitize_summary(
+                    summary_el.get_text(' ', strip=True) if summary_el else ''
+                )
+                articles.append(NewsArticle(
+                    title=title,
+                    source='vnexpress_stock',
+                    url=url,
+                    summary=summary,
+                    published_at=base_time - timedelta(minutes=idx),
+                    url_hash=self._hash_url(url),
+                ))
+        except Exception as e:
+            print(f"[RSSFetcher] Error parsing {VNEXPRESS_STOCK_URL}: {e}")
+
+        return articles
+
     def fetch_all_news(self) -> List[NewsArticle]:
         """Fetch news from all configured RSS feeds with Redis Caching."""
-        cache_key = "rss:all_news:v2"
+        cache_key = "rss:all_news:v3"
         
         # 1. Try Memory Cache
         if cache_key in self._memory_cache:
@@ -233,18 +278,37 @@ class RSSFetcher:
                 print(f"[RSSFetcher] Redis cache read error: {e}")
 
         # 3. Fetch Fresh Data
-        self.seen_hashes = set()
         all_articles = []
-        for source_name, feed_url in RSS_FEEDS.items():
-            articles = self.fetch_feed(feed_url, source_name)
-            all_articles.extend(articles)
-            print(f"[RSSFetcher] {source_name}: {len(articles)} articles")
+        with ThreadPoolExecutor(max_workers=min(4, len(RSS_FEEDS))) as executor:
+            future_map = {
+                executor.submit(self.fetch_feed, feed_url, source_name): source_name
+                for source_name, feed_url in RSS_FEEDS.items()
+            }
+            future_map[executor.submit(self.fetch_vnexpress_stock_page)] = 'vnexpress_stock'
+            for future in as_completed(future_map):
+                source_name = future_map[future]
+                try:
+                    articles = future.result()
+                except Exception as e:
+                    print(f"[RSSFetcher] Worker error for {source_name}: {e}")
+                    articles = []
+                all_articles.extend(articles)
+                print(f"[RSSFetcher] {source_name}: {len(articles)} articles")
 
         # Sort by published date (newest first)
         all_articles.sort(
             key=lambda a: a.published_at or datetime.min,
             reverse=True
         )
+
+        deduped_articles = []
+        seen_hashes = set()
+        for article in all_articles:
+            if article.url_hash in seen_hashes:
+                continue
+            seen_hashes.add(article.url_hash)
+            deduped_articles.append(article)
+        all_articles = deduped_articles
 
         # 4. Save to Cache
         self._memory_cache[cache_key] = (datetime.now(), all_articles)

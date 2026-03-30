@@ -24,6 +24,9 @@ settings = get_settings()
 class VnstockClient:
     """Wrapper around vnstock with graceful fallbacks and async support."""
 
+    STOCK_SOURCES = ("KBS", "VCI")
+    INDEX_SOURCES = ("KBS", "VCI")
+
     def __init__(self):
         try:
             self.redis_client = redis.Redis(
@@ -75,12 +78,65 @@ class VnstockClient:
         except Exception:
             self.redis_client = None
 
-    def _get_stock(self, symbol: str):
+    def _get_stock(self, symbol: str, source: str):
         if not VNSTOCK_AVAILABLE:
             return None
-        if symbol not in self._stock_cache:
-            self._stock_cache[symbol] = Vnstock().stock(symbol=symbol, source='VCI')
-        return self._stock_cache[symbol]
+        cache_key = f"{source}:{symbol}"
+        if cache_key not in self._stock_cache:
+            self._stock_cache[cache_key] = Vnstock(show_log=False).stock(
+                symbol=symbol,
+                source=source,
+            )
+        return self._stock_cache[cache_key]
+
+    def _normalize_index_df(self, df, source: str):
+        if df is None or df.empty or source != "KBS":
+            return df
+
+        for col in ("open", "high", "low", "close"):
+            if col in df.columns:
+                series = df[col].astype(float)
+                if not series.empty and float(series.abs().max()) < 20:
+                    df[col] = series * 1000
+        return df
+
+    def _build_ohlcv_result(self, symbol: str, df) -> Dict:
+        return {
+            'symbol': symbol,
+            'dates': df['time'].astype(str).tolist() if 'time' in df.columns else [],
+            'open': df['open'].tolist() if 'open' in df.columns else [],
+            'high': df['high'].tolist() if 'high' in df.columns else [],
+            'low': df['low'].tolist() if 'low' in df.columns else [],
+            'close': df['close'].tolist() if 'close' in df.columns else [],
+            'volume': df['volume'].tolist() if 'volume' in df.columns else [],
+        }
+
+    def _fetch_history_with_sources(
+        self,
+        symbol: str,
+        days: int,
+        sources: tuple[str, ...],
+        normalize_index: bool = False,
+    ):
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        errors = []
+
+        for source in sources:
+            try:
+                stock = self._get_stock(symbol, source)
+                df = stock.quote.history(start=start_date, end=end_date, interval='1D')
+                if df is None or df.empty:
+                    continue
+                if normalize_index:
+                    df = self._normalize_index_df(df, source)
+                return df, source
+            except Exception as e:
+                errors.append(f"{source}: {e}")
+
+        if errors:
+            print(f"[VnstockClient] History fetch failed for {symbol}: {' | '.join(errors)}")
+        return None, None
 
     # ─── Sync Methods ────────────────────────────────
 
@@ -96,24 +152,17 @@ class VnstockClient:
             return None
 
         try:
-            stock = self._get_stock(symbol)
-            end_date = datetime.now().strftime('%Y-%m-%d')
-            start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
-            df = stock.quote.history(start=start_date, end=end_date, interval='1D')
-
+            df, source = self._fetch_history_with_sources(
+                symbol,
+                days,
+                self.STOCK_SOURCES,
+            )
             if df is None or df.empty:
-                print(f"[VnstockClient] No data for {symbol}")
+                print(f"[VnstockClient] No data for {symbol} from {self.STOCK_SOURCES}")
                 return None
 
-            result = {
-                'symbol': symbol,
-                'dates': df['time'].astype(str).tolist() if 'time' in df.columns else [],
-                'open': df['open'].tolist() if 'open' in df.columns else [],
-                'high': df['high'].tolist() if 'high' in df.columns else [],
-                'low': df['low'].tolist() if 'low' in df.columns else [],
-                'close': df['close'].tolist() if 'close' in df.columns else [],
-                'volume': df['volume'].tolist() if 'volume' in df.columns else [],
-            }
+            result = self._build_ohlcv_result(symbol, df)
+            result['source'] = source
             self._set_cache(cache_key, json.dumps(result), 86400)
             return result
 
@@ -122,7 +171,7 @@ class VnstockClient:
             return None  # Graceful: never raise
 
     def get_intraday_price(self, symbol: str) -> Optional[Dict]:
-        """Get latest price. Cached 30s. Returns None on error."""
+        """Get latest reference price from the most recent daily bar. Cached 30s."""
         cache_key = f"intraday:{symbol}"
         cached = self._get_cache(cache_key)
         if cached:
@@ -132,25 +181,33 @@ class VnstockClient:
             return None
 
         try:
-            stock = self._get_stock(symbol)
-            today = datetime.now().strftime('%Y-%m-%d')
-            df = stock.quote.history(start=today, end=today, interval='1D')
-
-            if df is None or df.empty:
+            historical = self.get_historical_data(symbol, days=5)
+            if not historical:
                 return None
 
-            row = df.iloc[-1]
-            open_price = float(row.get('open', 0))
-            close_price = float(row.get('close', 0))
+            closes = historical.get('close') or []
+            opens = historical.get('open') or []
+            highs = historical.get('high') or []
+            lows = historical.get('low') or []
+            volumes = historical.get('volume') or []
+            if not closes:
+                return None
+
+            close_price = float(closes[-1])
+            open_price = float(opens[-1]) if opens else close_price
+            high_price = float(highs[-1]) if highs else close_price
+            low_price = float(lows[-1]) if lows else close_price
+            previous_close = float(closes[-2]) if len(closes) > 1 else close_price
             result = {
                 'symbol': symbol,
                 'price': close_price,
                 'open': open_price,
-                'high': float(row.get('high', 0)),
-                'low': float(row.get('low', 0)),
-                'volume': int(row.get('volume', 0)),
-                'change': round(close_price - open_price, 2),
-                'change_pct': round((close_price - open_price) / open_price * 100, 2) if open_price > 0 else 0,
+                'high': high_price,
+                'low': low_price,
+                'previous_close': previous_close,
+                'volume': int(volumes[-1]) if volumes else 0,
+                'change': round(close_price - previous_close, 2),
+                'change_pct': round((close_price - previous_close) / previous_close * 100, 2) if previous_close > 0 else 0,
                 'timestamp': datetime.now().isoformat(),
             }
             self._set_cache(cache_key, json.dumps(result), 30)
@@ -171,11 +228,12 @@ class VnstockClient:
             return None
 
         try:
-            stock = Vnstock().stock(symbol='VNINDEX', source='VCI')
-            end_date = datetime.now().strftime('%Y-%m-%d')
-            start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
-            df = stock.quote.history(start=start_date, end=end_date, interval='1D')
-
+            df, source = self._fetch_history_with_sources(
+                'VNINDEX',
+                days,
+                self.INDEX_SOURCES,
+                normalize_index=True,
+            )
             if df is None or df.empty:
                 return None
 
@@ -184,6 +242,7 @@ class VnstockClient:
                 'dates': df['time'].astype(str).tolist() if 'time' in df.columns else [],
                 'close': df['close'].tolist() if 'close' in df.columns else [],
                 'volume': df['volume'].tolist() if 'volume' in df.columns else [],
+                'source': source,
             }
             self._set_cache(cache_key, json.dumps(result), 86400)
             return result
@@ -203,22 +262,15 @@ class VnstockClient:
             return None
 
         try:
-            stock = Vnstock().stock(symbol='VNINDEX', source='VCI')
-            end_date = datetime.now().strftime('%Y-%m-%d')
-            start_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
-            df = stock.quote.history(start=start_date, end=end_date, interval='1D')
-
-            if df is None or df.empty or 'close' not in df.columns:
+            historical = self.get_market_index(days=5)
+            closes = historical.get('close', []) if historical else []
+            volumes = historical.get('volume', []) if historical else []
+            if not closes:
                 return None
 
-            close_series = df['close'].dropna()
-            if close_series.empty:
-                return None
-
-            latest_close = float(close_series.iloc[-1])
-            previous_close = float(close_series.iloc[-2]) if len(close_series) > 1 else latest_close
-            volume_series = df['volume'].dropna() if 'volume' in df.columns else None
-            latest_volume = int(volume_series.iloc[-1]) if volume_series is not None and not volume_series.empty else 0
+            latest_close = float(closes[-1])
+            previous_close = float(closes[-2]) if len(closes) > 1 else latest_close
+            latest_volume = int(volumes[-1]) if volumes else 0
             change = latest_close - previous_close
 
             result = {
@@ -248,9 +300,21 @@ class VnstockClient:
             return []
 
         try:
-            listing = Vnstock().stock(symbol='VCB', source='VCI').listing
-            df = listing.all_symbols()
+            df = None
+            errors = []
+            for source in self.STOCK_SOURCES:
+                try:
+                    listing = self._get_stock('VCB', source).listing
+                    df = listing.all_symbols()
+                    if df is not None and not df.empty:
+                        break
+                except Exception as e:
+                    errors.append(f"{source}: {e}")
+                    df = None
+
             if df is None or df.empty:
+                if errors:
+                    print(f"[VnstockClient] Symbol universe error: {' | '.join(errors)}")
                 return []
 
             result = []

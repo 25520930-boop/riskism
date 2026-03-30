@@ -19,13 +19,28 @@ class RiskismAPI {
         this.onAgentResult = null;
         this.onConnectionChange = null;
         this.demoMode = true; // Fallback to demo when backend is unavailable
+        this.REQUEST_TIMEOUT = 8000;
     }
 
     // ─── HTTP Methods ────────────────────────────────────
 
+    async fetchWithTimeout(url, options = {}, timeoutMs = this.REQUEST_TIMEOUT) {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+            return await fetch(url, {
+                ...options,
+                signal: controller.signal,
+            });
+        } finally {
+            window.clearTimeout(timeoutId);
+        }
+    }
+
     async get(endpoint) {
         try {
-            const res = await fetch(`${API_BASE}${endpoint}`);
+            const res = await this.fetchWithTimeout(`${API_BASE}${endpoint}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return await res.json();
         } catch (err) {
@@ -36,7 +51,7 @@ class RiskismAPI {
 
     async post(endpoint, data) {
         try {
-            const res = await fetch(`${API_BASE}${endpoint}`, {
+            const res = await this.fetchWithTimeout(`${API_BASE}${endpoint}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data),
@@ -49,9 +64,39 @@ class RiskismAPI {
         }
     }
 
+    async postAuth(endpoint, data) {
+        try {
+            const res = await this.fetchWithTimeout(`${API_BASE}${endpoint}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data),
+            });
+            const payload = await res.json().catch(() => null);
+            if (!res.ok) {
+                return {
+                    ok: false,
+                    status: res.status,
+                    error: payload?.detail || `HTTP ${res.status}`,
+                };
+            }
+            return { ok: true, status: res.status, data: payload };
+        } catch (err) {
+            console.warn(`[API] AUTH ${endpoint} failed:`, err.message);
+            return {
+                ok: false,
+                status: 0,
+                error: 'Network error. Please try again.',
+            };
+        }
+    }
+
     // ─── Auth ────────────────────────────────────────────
-    async login(username) {
-        return await this.post('/api/auth/login', { username });
+    async login(username, password) {
+        return await this.postAuth('/api/auth/login', { username, password });
+    }
+
+    async signup(username, password) {
+        return await this.postAuth('/api/auth/signup', { username, password });
     }
 
     async getFirebaseConfig() {
@@ -59,7 +104,7 @@ class RiskismAPI {
     }
 
     async loginWithFirebase(idToken, usernameHint = '') {
-        return await this.post('/api/auth/firebase/login', {
+        return await this.postAuth('/api/auth/firebase/login', {
             id_token: idToken,
             username_hint: usernameHint,
         });
@@ -92,18 +137,17 @@ class RiskismAPI {
         const sym = (symbol || '').trim().toUpperCase();
         if (!sym) return null;
 
-        const live = await this.getLatestPrice(sym);
-        if (live && Number.isFinite(Number(live.price))) {
-            return {
-                ...live,
-                symbol: sym,
-                price: Number(live.price),
-            };
-        }
-
         const history = await this.get(`/api/market/${sym}?days=2`);
         const closes = history?.close || [];
         if (!Array.isArray(closes) || closes.length === 0) {
+            const live = await this.getLatestPrice(sym);
+            if (live && Number.isFinite(Number(live.price))) {
+                return {
+                    ...live,
+                    symbol: sym,
+                    price: Number(live.price),
+                };
+            }
             return null;
         }
 
@@ -120,14 +164,13 @@ class RiskismAPI {
     }
 
     async getMarketIndexSnapshot() {
-        const live = await this.getLatestPrice('VNINDEX');
-        if (live && Number.isFinite(Number(live.change_pct))) {
-            return live;
-        }
-
         const history = await this.get('/api/market/VNINDEX?days=2');
         const closes = history?.close || [];
         if (!Array.isArray(closes) || closes.length === 0) {
+            const live = await this.getLatestPrice('VNINDEX');
+            if (live && Number.isFinite(Number(live.change_pct))) {
+                return live;
+            }
             return null;
         }
 
@@ -151,18 +194,24 @@ class RiskismAPI {
     // ─── Portfolio ───────────────────────────────────────
 
     async getPortfolio(userId) {
+        if (userId == null || userId === '' || userId === 'null' || userId === 'undefined') {
+            return null;
+        }
         const data = await this.get(`/api/portfolio/${userId}`);
         return data || this.getDemoPortfolio();
     }
 
     async getPortfolioRisk(userId) {
+        if (userId == null || userId === '' || userId === 'null' || userId === 'undefined') {
+            return null;
+        }
         const data = await this.get(`/api/portfolio/${userId}/risk`);
         return data || this.getDemoPortfolioRisk();
     }
 
     async updatePortfolio(userId, capital, holdings) {
         try {
-            const res = await fetch(`${API_BASE}/api/portfolio/${userId}/update`, {
+            const res = await this.fetchWithTimeout(`${API_BASE}/api/portfolio/${userId}/update`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -190,7 +239,7 @@ class RiskismAPI {
         return await this.get(`/api/insights/${userId}`);
     }
 
-    async getNews(limit = 20) {
+    async getNews(limit = 8) {
         const data = await this.get(`/api/news/latest?limit=${limit}`);
         return data || { articles: [], total: 0, fetched_at: new Date().toISOString() };
     }
@@ -199,11 +248,11 @@ class RiskismAPI {
 
     async triggerAgent(userId, type = 'morning', symbol = null) {
         try {
-            const res = await fetch(`${API_BASE}/api/agent/trigger`, {
+            const res = await this.fetchWithTimeout(`${API_BASE}/api/agent/trigger`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ user_id: userId, analysis_type: type, symbol }),
-            });
+            }, 120000);
             if (res.status === 429) {
                 const err = await res.json();
                 throw new Error(`429: ${err.detail || 'Rate limit exceeded'}`);

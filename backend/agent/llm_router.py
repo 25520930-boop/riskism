@@ -59,8 +59,22 @@ class LLMRouter:
             )
             return response.text or ""
         except Exception as e:
-            print(f"[LLMRouter] Gemini ({model_name}) error: {e}")
-            return self._mock_response(prompt)
+            error_msg = str(e).lower()
+            if (
+                "api key" in error_msg
+                or "401" in error_msg
+                or "403" in error_msg
+                or "expired" in error_msg
+                or "429" in error_msg
+                or "resource_exhausted" in error_msg
+                or "quota exceeded" in error_msg
+            ):
+                print(f"[LLMRouter] CRITICAL: Gemini API Key is invalid or expired: {e}")
+                # Store this state to avoid repeated failing calls
+                self.client = None 
+            else:
+                print(f"[LLMRouter] Gemini ({model_name}) error: {e}")
+            return self._mock_response(prompt, is_error=True, error_detail=str(e))
 
     def _extract_json(self, text: str) -> Optional[dict]:
         """Robustly extract JSON from LLM response text."""
@@ -125,11 +139,27 @@ class LLMRouter:
         print(f"[LLMRouter] JSON parse failed after retry. Raw: {result_text[:200]}")
         return fallback or {}
 
-    def _is_mock_payload(self, payload: Dict) -> bool:
-        return isinstance(payload, dict) and any(
-            isinstance(value, str) and '[Mock]' in value
-            for value in payload.values()
+    def _payload_has_demo_marker(self, value) -> bool:
+        if isinstance(value, dict):
+            return any(self._payload_has_demo_marker(item) for item in value.values())
+        if isinstance(value, list):
+            return any(self._payload_has_demo_marker(item) for item in value)
+        if not isinstance(value, str):
+            return False
+
+        normalized = value.lower()
+        markers = (
+            '[mock]',
+            '[chế độ demo]',
+            'resource_exhausted',
+            'sự cố ai',
+            'không thể phân tích',
+            'không thể đánh giá tác động',
         )
+        return any(marker in normalized for marker in markers)
+
+    def _is_mock_payload(self, payload: Dict) -> bool:
+        return self._payload_has_demo_marker(payload)
 
     def _heuristic_sentiment(self, title: str, summary: str) -> Dict:
         text = f"{title} {summary}".lower()
@@ -444,8 +474,38 @@ Phân tích (JSON):
             model_tier="reasoning"
         )
 
+    def _heuristic_chat_reply(self, message: str) -> str:
+        text = (message or '').lower()
+        glossary = [
+            (('var', 'value at risk'), 'VaR là mức lỗ ước tính trong điều kiện bình thường ở một ngưỡng xác suất, ví dụ 95%. VaR càng lớn thì rủi ro ngắn hạn càng cao.'),
+            (('cvar', 'expected shortfall'), 'CVaR là mức lỗ trung bình trong nhóm tình huống xấu nhất sau khi đã vượt VaR. Nó phản ánh tail risk rõ hơn VaR.'),
+            (('sharpe',), 'Sharpe Ratio đo lợi nhuận trên mỗi đơn vị biến động. Chỉ số càng cao thì hiệu quả lợi nhuận so với rủi ro càng tốt.'),
+            (('beta',), 'Beta cho biết cổ phiếu hoặc danh mục nhạy tới mức nào so với thị trường. Beta > 1 nghĩa là thường biến động mạnh hơn thị trường.'),
+            (('drawdown', 'max drawdown'), 'Max Drawdown là mức sụt giảm lớn nhất từ đỉnh xuống đáy trong một giai đoạn. Nó giúp nhìn rủi ro mất vốn thực tế dễ hơn lợi nhuận trung bình.'),
+            (('hhi', 'diversification'), 'HHI đo độ tập trung danh mục. HHI càng cao thì danh mục càng dồn vào ít mã, nghĩa là rủi ro tập trung lớn hơn.'),
+            (('reflection', 'self-reflection', 'agentic reflection'), 'Reflection Loop là cơ chế để hệ thống so dự báo buổi sáng với kết quả thực tế buổi chiều rồi rút kinh nghiệm cho lần sau.'),
+            (('capital tier', 'position size', 'capital'), 'Capital Tier dùng để gợi ý số lượng mã nên giữ và tỷ trọng mỗi vị thế sao cho phù hợp quy mô vốn, tránh danh mục quá loãng hoặc quá tập trung.'),
+            (('volatility regime', 'regime'), 'Volatility regime là trạng thái biến động của thị trường như low, normal, high hoặc extreme. Regime cao thường đi kèm nhu cầu quản trị rủi ro chặt hơn.'),
+        ]
+
+        for keywords, answer in glossary:
+            if any(keyword in text for keyword in keywords):
+                return answer
+
+        finance_hints = (
+            'risk', 'rủi ro', 'portfolio', 'danh mục', 'sentiment',
+            'chứng khoán', 'cổ phiếu', 'riskism', 'beta', 'var', 'sharpe'
+        )
+        if any(hint in text for hint in finance_hints):
+            return 'Riskism đang tập trung giải thích các chỉ số như VaR, CVaR, Beta, Sharpe, Drawdown, HHI hoặc logic AI Reflection. Bạn hỏi đúng tên chỉ số là mình giải thích nhanh cho bạn.'
+
+        return 'Mình hiện chỉ hỗ trợ giải thích thuật ngữ về Riskism, quản trị rủi ro và chứng khoán. Bạn thử hỏi như: VaR là gì, Beta là gì, hoặc Reflection Loop hoạt động ra sao.'
+
     def chat_assistant(self, message: str, history: list) -> str:
         """Handle chatbot assistance specifically for terms and explanations."""
+        if not self.client:
+            return self._heuristic_chat_reply(message)
+
         system = (
             "Bạn là 'Riskism Assistant', một trợ lý AI thân thiện chuyên giải thích các thuật ngữ "
             "về tài chính, quản trị rủi ro chứng khoán và dự án Riskism (như VaR, CVaR, Sharpe Ratio, HHI, "
@@ -467,56 +527,65 @@ Phân tích (JSON):
                 
         prompt = f"Lịch sử trò chuyện gần đây:\n{context}\n\nUser: {message}\nAssistant:"
         
-        return self._call_gemini(
+        reply = self._call_gemini(
             prompt, system,
             temperature=0.4,
             model_tier="fast"
         )
+        if isinstance(reply, str) and reply.startswith("⚠️ [Sự cố AI]"):
+            return self._heuristic_chat_reply(message)
+        return reply
 
-    def _mock_response(self, prompt: str) -> str:
-        """Generate mock response when Gemini is not available."""
+    def _mock_response(self, prompt: str, is_error: bool = False, error_detail: str = "") -> str:
+        """Generate mock response when Gemini is not available or fails."""
+        # Detect if this is an explicit error (e.g. invalid API Key)
+        error_context = f" (Chi tiết: {error_detail})" if error_detail else ""
+        
         if 'assistant:' in prompt.lower():
-            return "Xin lỗi, hiện tại AI backend đang tắt hoặc thiếu API Key! Lời nhắc: VaR là Value at Risk nhé!"
+            if is_error or not self.client:
+                return f"⚠️ [Sự cố AI] Google Gemini API Key đã hết hạn hoặc chưa được cấu hình! {error_context}. Vui lòng kiểm tra lại file .env của bạn."
+            return "Xin lỗi, hiện tại tôi không thể kết nối với bộ não chính. Lời nhắc: Bạn có thể kiểm tra VaR (Value at Risk) trong tab Portfolio nhé!"
+            
         elif 'sentiment' in prompt.lower():
             return json.dumps({
-                'score': 0.2,
-                'label': 'hơi tích cực',
-                'reasoning': '[Mock] Tin tức có yếu tố tích cực nhẹ cho thị trường.'
+                'score': 0.0,
+                'label': 'trung tính',
+                'reasoning': f'[Chế độ Demo] AI đang bảo trì API Key. Chấm điểm theo trọng số từ khóa mặc định.{error_context}'
             })
         elif 'impact' in prompt.lower() or 'tác động' in prompt.lower():
             return json.dumps({
                 'impact_level': 'medium',
                 'affected_symbols': [],
-                'explanation': '[Mock] Tin tức có ảnh hưởng trung bình đến thị trường.'
+                'explanation': f'[Chế độ Demo] Không thể phân tích chuyên sâu tin tức do lỗi API.{error_context}'
+            })
+        elif 'reflection' in prompt.lower():
+            return json.dumps({
+                'accuracy_score': 0.5,
+                'what_was_right': f'[Chế độ Demo] Đang sử dụng logic phản chiếu mẫu.{error_context}',
+                'what_was_wrong': '[Chế độ Demo] Không thể truy cập Gemini để tự đánh giá.',
+                'lesson_learned': 'Cần kiểm tra lại cấu hình API Key trong file .env.',
+                'improvement_suggestion': 'Cập nhật Gemini API Key mới để kích hoạt AI tinh chỉnh rủi ro.',
             })
         elif 'dự báo' in prompt.lower() or 'prediction' in prompt.lower():
             return json.dumps({
                 'prediction': 'đi ngang',
                 'confidence': 0.5,
-                'reasoning': '[Mock] Thị trường đang trong giai đoạn tích lũy.',
+                'reasoning': f'[Chế độ Demo] AI đang sử dụng dự báo mẫu do mất kết nối Gemini.{error_context}',
                 'key_risks': ['Thanh khoản thấp', 'Áp lực bán ròng từ khối ngoại'],
                 'watch_symbols': ['VCB', 'FPT'],
             })
-        elif 'reflection' in prompt.lower():
-            return json.dumps({
-                'accuracy_score': 0.6,
-                'what_was_right': '[Mock] Xu hướng chung khớp dự báo',
-                'what_was_wrong': '[Mock] Mức biến động mạnh hơn dự kiến',
-                'lesson_learned': '[Mock] Cần chú ý hơn đến dòng tiền ngoại',
-                'improvement_suggestion': '[Mock] Thêm chỉ báo dòng tiền vào phân tích',
-            })
         else:
             return json.dumps({
-                'title': 'Báo cáo rủi ro Riskism',
+                'title': f'Báo cáo rủi ro mẫu (Chế độ Mock){" - Lỗi API!" if is_error else ""}',
                 'risk_level': 'medium',
-                'summary': '[Mock] Thị trường đang ở mức rủi ro trung bình. Cần theo dõi thêm.',
+                'summary': f'[Chế độ Demo] Hệ thống hiện đang phân tích dựa trên thuật toán offline do lỗi API Key. {error_context}',
                 'key_findings': [
-                    '[Mock] VN-Index đang giao dịch trong biên độ hẹp',
-                    '[Mock] Thanh khoản giảm so với TB 20 phiên',
+                    '[Offline] VN-Index đang dao dịch trong biên độ hẹp',
+                    '[Offline] Thanh khoản giảm so với TB 20 phiên',
                 ],
                 'risk_factors': ['Rủi ro thanh khoản', 'Áp lực tỷ giá'],
                 'action_items': ['Giữ tỷ trọng tiền mặt hợp lý', 'Theo dõi dòng tiền'],
-                'confidence_score': 0.6,
+                'confidence_score': 0.5,
                 'trends': [
                     {'ticker': 'VCB', 'trend': 'up', 'conf': 85},
                     {'ticker': 'VIC', 'trend': 'down', 'conf': 70},

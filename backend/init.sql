@@ -6,6 +6,7 @@
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     username VARCHAR(100) UNIQUE NOT NULL,
+    password_hash TEXT,
     firebase_uid VARCHAR(255) UNIQUE,
     email VARCHAR(255) UNIQUE,
     avatar_url TEXT,
@@ -18,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(255);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 
 -- Portfolio Holdings
 CREATE TABLE IF NOT EXISTS portfolios (
@@ -135,9 +137,19 @@ CREATE INDEX IF NOT EXISTS idx_reflections_user ON reflections(user_id, evaluate
 -- ============================================
 -- Seed default user
 -- ============================================
-INSERT INTO users (id, username, risk_appetite, capital_amount)
-VALUES (1, 'demo_user', 'moderate', 20000000)
+INSERT INTO users (id, username, password_hash, risk_appetite, capital_amount)
+VALUES (
+    1,
+    'demo_user',
+    'pbkdf2_sha256$310000$9c3f4ec51f8ae5ff27b1e978df3f98b0$e623f55994dab0705f4080292443eb20a0dbc2292fd62a675aafb4cdffe0bb0a',
+    'moderate',
+    20000000
+)
 ON CONFLICT (id) DO NOTHING;
+
+UPDATE users
+SET password_hash = 'pbkdf2_sha256$310000$9c3f4ec51f8ae5ff27b1e978df3f98b0$e623f55994dab0705f4080292443eb20a0dbc2292fd62a675aafb4cdffe0bb0a'
+WHERE username = 'demo_user' AND password_hash IS NULL AND firebase_uid IS NULL;
 
 -- Seed default portfolio
 INSERT INTO portfolios (user_id, symbol, quantity, avg_price, sector)

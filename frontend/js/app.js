@@ -8,22 +8,164 @@ class RiskismApp {
         this.agentResult = null;
         this.portfolioData = null; // Cached portfolio risk data
         this.tickerInterval = null;
-        this.userId = localStorage.getItem('riskism_user_id') || null;
+        this.userId = this.normalizeUserId(localStorage.getItem('riskism_user_id'));
         this.username = localStorage.getItem('riskism_username') || null;
         this.API_TIMEOUT = 15000;
         this.firebaseEnabled = false;
+        this.authMode = 'signin';
+        this._isLoadingData = false;
         this._bootstrapped = false;
     }
 
+    normalizeUserId(value) {
+        if (value == null) return null;
+        const normalized = String(value).trim();
+        if (!normalized || normalized === 'null' || normalized === 'undefined') {
+            return null;
+        }
+        const parsed = Number(normalized);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    }
+
+    isAuthenticated() {
+        return Number.isFinite(Number(this.userId)) && Number(this.userId) > 0;
+    }
+
+    runSafely(label, fn) {
+        try {
+            return fn();
+        } catch (err) {
+            console.error(`[Bootstrap] ${label} failed:`, err);
+            return null;
+        }
+    }
+
+    runBackgroundTask(label, fn) {
+        try {
+            return Promise.resolve(fn()).catch(err => {
+                console.error(`[Bootstrap] ${label} failed:`, err);
+                return null;
+            });
+        } catch (err) {
+            console.error(`[Bootstrap] ${label} failed:`, err);
+            return Promise.resolve(null);
+        }
+    }
+
+    async ensureExternalScript(key, src, isReady, timeoutMs = 8000) {
+        if (typeof isReady === 'function' && isReady()) {
+            return true;
+        }
+
+        window.__riskismScriptPromises = window.__riskismScriptPromises || {};
+        if (window.__riskismScriptPromises[key]) {
+            return window.__riskismScriptPromises[key];
+        }
+
+        window.__riskismScriptPromises[key] = new Promise((resolve, reject) => {
+            const existing = document.querySelector(`script[data-riskism-asset="${key}"]`);
+            if (existing) {
+                const timer = window.setTimeout(() => reject(new Error(`${key} load timed out`)), timeoutMs);
+                existing.addEventListener('load', () => {
+                    window.clearTimeout(timer);
+                    resolve(true);
+                }, { once: true });
+                existing.addEventListener('error', () => {
+                    window.clearTimeout(timer);
+                    reject(new Error(`${key} failed to load`));
+                }, { once: true });
+                return;
+            }
+
+            const script = document.createElement('script');
+            script.src = src;
+            script.async = true;
+            script.dataset.riskismAsset = key;
+
+            const timer = window.setTimeout(() => {
+                reject(new Error(`${key} load timed out`));
+            }, timeoutMs);
+
+            script.addEventListener('load', () => {
+                window.clearTimeout(timer);
+                if (typeof isReady === 'function' && !isReady()) {
+                    reject(new Error(`${key} loaded but is not ready`));
+                    return;
+                }
+                resolve(true);
+            }, { once: true });
+
+            script.addEventListener('error', () => {
+                window.clearTimeout(timer);
+                reject(new Error(`${key} failed to load`));
+            }, { once: true });
+
+            document.head.appendChild(script);
+        });
+
+        return window.__riskismScriptPromises[key];
+    }
+
+    async ensureChartLibrary() {
+        if (typeof window.Chart !== 'undefined') {
+            window.dispatchEvent(new Event('riskism:chartjs-ready'));
+            return true;
+        }
+
+        await this.ensureExternalScript(
+            'chartjs',
+            'https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js',
+            () => typeof window.Chart !== 'undefined',
+            8000
+        );
+
+        window.dispatchEvent(new Event('riskism:chartjs-ready'));
+        if (this.portfolioData) {
+            UI.renderPortfolio(this.portfolioData);
+        }
+        return true;
+    }
+
+    async ensureHtml2Canvas() {
+        if (typeof window.html2canvas !== 'undefined') {
+            return true;
+        }
+
+        await this.ensureExternalScript(
+            'html2canvas',
+            'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js',
+            () => typeof window.html2canvas === 'function',
+            8000
+        );
+        return true;
+    }
+
+    async ensureFirebaseSdk() {
+        await this.ensureExternalScript(
+            'firebase-app',
+            'https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js',
+            () => typeof window.firebase !== 'undefined',
+            8000
+        );
+        await this.ensureExternalScript(
+            'firebase-auth',
+            'https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js',
+            () => typeof window.firebase?.auth === 'function',
+            8000
+        );
+        return true;
+    }
+
     async init() {
-        await this.initFirebaseAuth();
         this.bindAuth();
+        this.runBackgroundTask('Firebase auth bootstrap', () => this.initFirebaseAuth());
         
-        if (!this.userId) {
-            document.getElementById('modal-login').classList.add('active');
+        if (!this.isAuthenticated()) {
+            this.showLoginModal();
             return;
         }
         
+        this.hideLoginModal();
         this.finishInit();
     }
 
@@ -32,36 +174,32 @@ class RiskismApp {
         if (nameEl) nameEl.textContent = this.username || 'User';
 
         if (this._bootstrapped) {
-            this.loadAllData();
+            this.runBackgroundTask('Dashboard refresh', () => this.loadAllData());
             this.updateStatusBar('connected');
             UI.toast(`Welcome back, ${this.username}! 🚀`, 'success');
             return;
         }
 
         this._bootstrapped = true;
-        this.bindNavigation();
-        this.bindAgentButton();
-        this.bindNewsToggle();
-        this.bindNewsSearch();
-        this.bindRiskSelect();
-        this.bindPortfolioEditor();
-        this.bindNotifications();
-        this.bindLogout();
-        this.bindKeyboardShortcuts();
-        this.startClock();
-        this.loadMarketTicker();
-
-        // Draw demo sparklines immediately
-        charts.drawAllSparklines(null);
-
-        // Load all data from backend (non-blocking)
-        this.loadAllData();
-        
-        // Init features
-        UI.initChatbot();
-
-        // Update status bar
+        this.runSafely('Bind navigation', () => this.bindNavigation());
+        this.runSafely('Bind agent actions', () => this.bindAgentButton());
+        this.runSafely('Bind news toggle', () => this.bindNewsToggle());
+        this.runSafely('Bind news search', () => this.bindNewsSearch());
+        this.runSafely('Bind risk selectors', () => this.bindRiskSelect());
+        this.runSafely('Bind portfolio editor', () => this.bindPortfolioEditor());
+        this.runSafely('Bind notifications', () => this.bindNotifications());
+        this.runSafely('Bind logout', () => this.bindLogout());
+        this.runSafely('Bind keyboard shortcuts', () => this.bindKeyboardShortcuts());
+        this.runSafely('Start clock', () => this.startClock());
         this.updateStatusBar('connected');
+        this.runBackgroundTask('Load market ticker', () => this.loadMarketTicker());
+        this.runBackgroundTask('Chart.js bootstrap', async () => {
+            await this.ensureChartLibrary();
+            charts.drawAllSparklines(this.portfolioData?.metrics_history || null);
+        });
+        this.runSafely('Draw fallback sparklines', () => charts.drawAllSparklines(null));
+        this.runBackgroundTask('Load dashboard data', () => this.loadAllData());
+        this.runSafely('Init chatbot', () => UI.initChatbot());
 
         UI.toast(`Welcome back, ${this.username}! 🚀`, 'success');
 
@@ -76,17 +214,20 @@ class RiskismApp {
 
         try {
             const payload = await api.getFirebaseConfig();
-            const enabled = Boolean(
-                payload?.enabled &&
-                payload?.config &&
-                window.FirebaseAuthBridge &&
-                window.FirebaseAuthBridge.init(payload.config)
-            );
+            const wantsFirebase = Boolean(payload?.enabled && payload?.config && window.FirebaseAuthBridge);
+            if (!wantsFirebase) {
+                this.firebaseEnabled = false;
+                [googleBtn, divider, note].forEach(el => el?.classList.add('hidden'));
+                return;
+            }
+
+            await this.ensureFirebaseSdk();
+            const enabled = Boolean(window.FirebaseAuthBridge.init(payload.config));
             this.firebaseEnabled = enabled;
             [googleBtn, divider, note].forEach(el => el?.classList.toggle('hidden', !enabled));
             if (note) {
                 note.textContent = enabled
-                    ? 'Google sign-in is enabled via Firebase Auth.'
+                    ? 'Google sign-in is available.'
                     : '';
             }
         } catch (err) {
@@ -99,24 +240,78 @@ class RiskismApp {
     completeLoginSession(res) {
         if (!res || !res.user_id) return false;
 
-        this.userId = res.user_id;
+        this.userId = this.normalizeUserId(res.user_id);
         this.username = res.display_name || res.username;
-        localStorage.setItem('riskism_user_id', res.user_id);
+        localStorage.setItem('riskism_user_id', String(this.userId));
         localStorage.setItem('riskism_username', this.username);
         localStorage.setItem('riskism_auth_provider', res.auth_provider || 'local');
-        document.getElementById('modal-login').classList.remove('active');
+        this.hideLoginModal();
         this.finishInit();
         return true;
+    }
+
+    setAuthMode(mode = 'signin') {
+        this.authMode = mode === 'signup' ? 'signup' : 'signin';
+        const isSignup = this.authMode === 'signup';
+
+        document.querySelectorAll('.auth-mode-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.authMode === this.authMode);
+        });
+
+        const kicker = document.getElementById('auth-form-kicker');
+        const title = document.getElementById('auth-form-title');
+        const copy = document.getElementById('auth-form-copy');
+        const note = document.getElementById('auth-inline-note');
+        const submit = document.getElementById('btn-login');
+        const switchCopy = document.getElementById('auth-switch-copy');
+        const switchBtn = document.getElementById('auth-switch-btn');
+        const confirmGroup = document.getElementById('auth-confirm-group');
+        const passwordInput = document.getElementById('login-password');
+        const confirmInput = document.getElementById('login-password-confirm');
+
+        if (kicker) kicker.textContent = isSignup ? 'Get started' : 'Welcome back';
+        if (title) title.textContent = isSignup ? 'Create your Riskism account' : 'Sign in to Riskism';
+        if (copy) copy.textContent = isSignup
+            ? 'Create a username and password to start with a fresh workspace.'
+            : 'Use your username and password to access your workspace.';
+        if (note) note.textContent = isSignup
+            ? 'Choose a password with at least 8 characters.'
+            : 'Use the account you already created on this device.';
+        if (submit) submit.textContent = isSignup ? 'Create account' : 'Sign in';
+        if (switchCopy) switchCopy.textContent = isSignup ? 'Already have an account?' : 'New here?';
+        if (switchBtn) switchBtn.textContent = isSignup ? 'Sign in' : 'Create an account';
+        if (confirmGroup) confirmGroup.classList.toggle('hidden', !isSignup);
+        if (passwordInput) {
+            passwordInput.autocomplete = isSignup ? 'new-password' : 'current-password';
+        }
+        if (confirmInput && !isSignup) {
+            confirmInput.value = '';
+        }
+    }
+
+    showLoginModal() {
+        this.setAuthMode('signin');
+        document.getElementById('login-username')?.value = '';
+        document.getElementById('login-password')?.value = '';
+        document.getElementById('login-password-confirm')?.value = '';
+        document.getElementById('modal-login')?.classList.add('active');
+        document.body.classList.add('auth-active');
+        window.setTimeout(() => {
+            document.getElementById('login-username')?.focus();
+        }, 80);
+    }
+
+    hideLoginModal() {
+        document.getElementById('modal-login')?.classList.remove('active');
+        document.body.classList.remove('auth-active');
     }
 
     async exportReport() {
         const reportEl = document.getElementById('card-report');
         if (!reportEl) return;
-        if (typeof html2canvas === 'undefined') {
-            UI.toast('Export library not loaded', 'error'); return;
-        }
         UI.toast('Generating export...', 'info');
         try {
+            await this.ensureHtml2Canvas();
             const canvas = await html2canvas(reportEl, {
                 backgroundColor: '#ffffff',
                 scale: 2,
@@ -136,37 +331,90 @@ class RiskismApp {
     // ─── Auth ────────────────────────────────────
     bindAuth() {
         const btn = document.getElementById('btn-login');
-        const input = document.getElementById('login-username');
+        const usernameInput = document.getElementById('login-username');
+        const passwordInput = document.getElementById('login-password');
+        const confirmInput = document.getElementById('login-password-confirm');
         const googleBtn = document.getElementById('btn-login-google');
-        if (!btn || !input) return;
+        const switchBtn = document.getElementById('auth-switch-btn');
+        const modeButtons = document.querySelectorAll('.auth-mode-btn');
+        if (!btn || !usernameInput || !passwordInput || !switchBtn) return;
 
-        const doLogin = async () => {
-            const val = input.value.trim();
-            if (!val) {
-                UI.toast('Please enter username', 'error'); return;
+        this.setAuthMode(this.authMode);
+
+        const setLoadingState = (loading, label = '') => {
+            btn.disabled = loading;
+            if (googleBtn) googleBtn.disabled = loading;
+            if (loading && label) {
+                btn.textContent = label;
+                return;
             }
-            btn.textContent = 'Authenticating...';
-            btn.disabled = true;
+            this.setAuthMode(this.authMode);
+        };
+
+        const submitAuth = async () => {
+            const username = usernameInput.value.trim().toLowerCase();
+            const password = passwordInput.value;
+            const confirmPassword = confirmInput?.value || '';
+
+            if (!username) {
+                UI.toast('Enter your username.', 'error'); return;
+            }
+            if (!password) {
+                UI.toast('Enter your password.', 'error'); return;
+            }
+            if (this.authMode === 'signup') {
+                if (password.length < 8) {
+                    UI.toast('Use at least 8 characters for your password.', 'error'); return;
+                }
+                if (password !== confirmPassword) {
+                    UI.toast('Passwords do not match.', 'error'); return;
+                }
+            }
+
+            setLoadingState(true, this.authMode === 'signup' ? 'Creating account...' : 'Signing in...');
             try {
-                const res = await api.login(val);
-                if (!this.completeLoginSession(res)) {
-                    UI.toast('Login error, please try again.', 'error');
+                const result = this.authMode === 'signup'
+                    ? await api.signup(username, password)
+                    : await api.login(username, password);
+
+                if (!result?.ok) {
+                    UI.toast(result?.error || 'Authentication failed.', 'error');
+                    return;
+                }
+                if (!this.completeLoginSession(result.data)) {
+                    UI.toast('Authentication failed. Please try again.', 'error');
+                    return;
+                }
+                if (this.authMode === 'signup') {
+                    UI.toast('Account created. Welcome to Riskism.', 'success');
                 }
             } catch (e) {
-                UI.toast('Server error', 'error');
+                UI.toast('Server error. Please try again shortly.', 'error');
             } finally {
-                btn.textContent = 'Access Terminal';
-                btn.disabled = false;
+                setLoadingState(false);
             }
         };
 
-        btn.addEventListener('click', doLogin);
-        input.addEventListener('keypress', (e) => { if(e.key==='Enter') doLogin() });
+        btn.addEventListener('click', submitAuth);
+        [usernameInput, passwordInput, confirmInput].forEach(input => {
+            input?.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    submitAuth();
+                }
+            });
+        });
+        modeButtons.forEach(modeBtn => {
+            modeBtn.addEventListener('click', () => this.setAuthMode(modeBtn.dataset.authMode));
+        });
+        switchBtn.addEventListener('click', () => {
+            this.setAuthMode(this.authMode === 'signup' ? 'signin' : 'signup');
+        });
 
         if (googleBtn) {
             googleBtn.addEventListener('click', async () => {
                 if (!this.firebaseEnabled || !window.FirebaseAuthBridge?.enabled) {
-                    UI.toast('Firebase Auth chưa được cấu hình trên backend', 'info');
+                    UI.toast('Google sign-in is not configured on the backend.', 'info');
                     return;
                 }
 
@@ -174,20 +422,22 @@ class RiskismApp {
                 googleBtn.disabled = true;
                 try {
                     const firebaseUser = await window.FirebaseAuthBridge.signInWithGoogle();
-                    const res = await api.loginWithFirebase(
+                    const result = await api.loginWithFirebase(
                         firebaseUser.idToken,
-                        firebaseUser.displayName || firebaseUser.email || input.value.trim()
+                        firebaseUser.displayName || firebaseUser.email || usernameInput.value.trim()
                     );
-                    if (!this.completeLoginSession(res)) {
+                    if (!result?.ok) {
+                        UI.toast(result?.error || 'Google sign-in failed.', 'error');
+                    } else if (!this.completeLoginSession(result.data)) {
                         UI.toast('Firebase login error, please try again.', 'error');
                     }
                 } catch (e) {
                     const message = String(e?.message || '');
                     if (message.includes('popup') || message.includes('cancel')) {
-                        UI.toast('Google sign-in was cancelled', 'info');
+                        UI.toast('Google sign-in was cancelled.', 'info');
                     } else {
                         console.error('[Firebase Login]', e);
-                        UI.toast('Firebase sign-in failed', 'error');
+                        UI.toast('Google sign-in failed.', 'error');
                     }
                 } finally {
                     googleBtn.textContent = 'Continue with Google';
@@ -254,7 +504,8 @@ class RiskismApp {
             localStorage.removeItem('riskism_auth_provider');
             this.userId = null;
             this.username = null;
-            document.getElementById('modal-login').classList.add('active');
+            this._isLoadingData = false;
+            this.showLoginModal();
             UI.toast('Logged out successfully', 'info');
         });
     }
@@ -552,11 +803,23 @@ class RiskismApp {
             rows.forEach(r => {
                 const sym = r.querySelector('.pf-sym').value.trim().toUpperCase();
                 const qty = parseInt(r.querySelector('.pf-qty').value) || 0;
+                const priceInput = r.querySelector('.pf-prc');
+                const rawPrice = (priceInput?.dataset?.price || priceInput?.value || '').replace(/,/g, '').trim();
+                const avgPrice = Number(rawPrice);
                 if (sym && qty > 0) {
-                    holdingsMap.set(sym, (holdingsMap.get(sym) || 0) + qty);
+                    const existing = holdingsMap.get(sym) || { symbol: sym, quantity: 0, avg_price: null };
+                    existing.quantity += qty;
+                    if (Number.isFinite(avgPrice) && avgPrice > 0) {
+                        existing.avg_price = avgPrice;
+                    }
+                    holdingsMap.set(sym, existing);
                 }
             });
-            const holdings = Array.from(holdingsMap.entries()).map(([symbol, quantity]) => ({ symbol, quantity }));
+            const holdings = Array.from(holdingsMap.values()).map(item => ({
+                symbol: item.symbol,
+                quantity: item.quantity,
+                avg_price: item.avg_price,
+            }));
 
             btnSave.textContent = 'Saving...';
             btnSave.disabled = true;
@@ -649,10 +912,14 @@ class RiskismApp {
 
     // ─── Data Loaders ────────────────────────────
     async loadAllData() {
+        if (!this.isAuthenticated() || this._isLoadingData) {
+            return;
+        }
+        this._isLoadingData = true;
         this.loadMarketTicker();
 
         // Load news
-        this._fetchWithTimeout(api.getNews(), this.API_TIMEOUT)
+        const newsPromise = this._fetchWithTimeout(api.getNews(8), this.API_TIMEOUT)
             .then(news => {
                 window._cachedNews = news?.articles || [];
                 this.refreshNewsForCurrentPortfolio();
@@ -660,7 +927,7 @@ class RiskismApp {
             .catch(e => {
                 console.warn('[Dashboard] News load failed:', e.message);
                 window._cachedNews = [];
-                UI.renderNewsEmpty('Không tải được tin tức realtime lúc này.');
+                UI.renderNewsEmpty('Live news is temporarily unavailable.');
             });
 
         // Load portfolio risk (contains ALL real data)
@@ -674,6 +941,9 @@ class RiskismApp {
             }
         } catch (e) {
             console.warn('[Dashboard] Portfolio load failed:', e.message);
+        } finally {
+            await newsPromise.catch(() => null);
+            this._isLoadingData = false;
         }
     }
 
@@ -730,7 +1000,7 @@ class RiskismApp {
 
         // Realtime Polling (Every 30s)
         setInterval(() => {
-            console.log('[Dashboard] Auto-refreshing data...');
+            if (!this.isAuthenticated()) return;
             this.loadAllData();
             this.updateStatusBar('connected');
         }, 30000);
@@ -801,4 +1071,11 @@ class RiskismApp {
 }
 
 const app = new RiskismApp();
-document.addEventListener('DOMContentLoaded', () => app.init());
+window.app = app;
+document.addEventListener('DOMContentLoaded', () => {
+    Promise.resolve(app.init()).catch(err => {
+        console.error('[App] Initialization failed:', err);
+        app.updateStatusBar('disconnected');
+        UI.toast('App loaded with limited features. Refresh to retry.', 'error');
+    });
+});

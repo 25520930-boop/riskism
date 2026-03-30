@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=DM+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/styles.css?v=15">
+    <link rel="stylesheet" href="css/styles.css?v=19">
 </head>
 <body>
     <!-- ═══ TOP BAR: Brand + Market Tabs + Live Ticker ═══ -->
@@ -416,17 +416,67 @@
     <div class="toast-wrap" id="toast-wrap"></div>
 
     <!-- Login Modal -->
-    <div class="modal" id="modal-login">
-        <div class="modal-content">
-            <h2 class="modal-title">Welcome to RISKISM</h2>
-            <p class="modal-desc">Enter your username to access your secure portfolio environment. A new account will be created if the username does not exist. If Firebase is configured, you can also sign in with Google.</p>
-            <div class="form-group">
-                <input type="text" id="login-username" class="form-input" placeholder="e.g. demo_user" autocomplete="off">
-            </div>
-            <button class="btn-primary w-full" id="btn-login" style="margin-top: 16px;">Access Terminal</button>
-            <div class="auth-divider hidden" id="auth-divider"><span>or</span></div>
-            <button class="btn-outline w-full firebase-btn hidden" id="btn-login-google" type="button">Continue with Google</button>
-            <div class="auth-note hidden" id="firebase-auth-note">Firebase Auth is ready.</div>
+    <div class="modal modal-auth" id="modal-login">
+        <div class="auth-shell">
+            <section class="auth-panel auth-panel-brand">
+                <div class="auth-brand-lockup">
+                    <div class="auth-brand-mark">R</div>
+                    <div class="auth-brand-copy">
+                        <p class="auth-eyebrow">RISKISM</p>
+                        <h2 class="auth-hero-title">Risk intelligence for Vietnam equities.</h2>
+                        <p class="auth-hero-copy">Track portfolios, live VN-Index moves, and market news in one clean workspace.</p>
+                    </div>
+                </div>
+                <div class="auth-hero-grid">
+                    <div class="auth-hero-card">
+                        <span class="auth-hero-label">Realtime</span>
+                        <strong>VN-Index + ticker</strong>
+                        <p>Watch live index movement, current pricing, and market snapshots in one place.</p>
+                    </div>
+                    <div class="auth-hero-card">
+                        <span class="auth-hero-label">News intelligence</span>
+                        <strong>Market + company flow</strong>
+                        <p>Follow market headlines and company-specific stories with cleaner sentiment context.</p>
+                    </div>
+                    <div class="auth-hero-card">
+                        <span class="auth-hero-label">Portfolio</span>
+                        <strong>Risk-first workspace</strong>
+                        <p>Keep VaR, beta, drawdown, and AI workflows together in a focused workspace.</p>
+                    </div>
+                </div>
+            </section>
+            <section class="auth-panel auth-panel-form">
+                <div class="auth-form-head">
+                    <p class="auth-form-kicker" id="auth-form-kicker">Welcome back</p>
+                    <h3 class="auth-form-title" id="auth-form-title">Sign in to Riskism</h3>
+                    <p class="auth-form-copy" id="auth-form-copy">Use your username and password to access your workspace.</p>
+                </div>
+                <div class="auth-mode-switch" id="auth-mode-switch">
+                    <button class="auth-mode-btn active" type="button" data-auth-mode="signin">Sign in</button>
+                    <button class="auth-mode-btn" type="button" data-auth-mode="signup">Create account</button>
+                </div>
+                <div class="form-group auth-input-group">
+                    <label for="login-username">Username</label>
+                    <input type="text" id="login-username" class="form-input auth-input" placeholder="jdoe" autocomplete="username">
+                </div>
+                <div class="form-group auth-input-group">
+                    <label for="login-password">Password</label>
+                    <input type="password" id="login-password" class="form-input auth-input" placeholder="Your password" autocomplete="current-password">
+                </div>
+                <div class="form-group auth-input-group hidden" id="auth-confirm-group">
+                    <label for="login-password-confirm">Confirm password</label>
+                    <input type="password" id="login-password-confirm" class="form-input auth-input" placeholder="Repeat your password" autocomplete="new-password">
+                </div>
+                <p class="auth-inline-note" id="auth-inline-note">Use the account you already created on this device.</p>
+                <button class="btn-primary w-full auth-submit" id="btn-login" type="button">Sign in</button>
+                <div class="auth-switch-row">
+                    <span class="auth-switch-copy" id="auth-switch-copy">New here?</span>
+                    <button class="auth-switch-btn" id="auth-switch-btn" type="button">Create an account</button>
+                </div>
+                <div class="auth-divider hidden" id="auth-divider"><span>or</span></div>
+                <button class="btn-outline w-full firebase-btn hidden auth-google-btn" id="btn-login-google" type="button">Continue with Google</button>
+                <div class="auth-note hidden" id="firebase-auth-note">Google sign-in is available.</div>
+            </section>
         </div>
     </div>
 
@@ -477,14 +527,10 @@
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
-    <script src="js/api.js?v=15"></script>
-    <script src="js/charts.js?v=15"></script>
-    <script src="js/components.js?v=15"></script>
-    <script src="js/firebase-auth.js?v=15"></script>
-    <script src="js/app.js?v=15"></script>
+    <script src="js/api.js?v=19"></script>
+    <script src="js/charts.js?v=19"></script>
+    <script src="js/components.js?v=19"></script>
+    <script src="js/firebase-auth.js?v=19"></script>
+    <script src="js/app.js?v=19"></script>
 </body>
 </html>

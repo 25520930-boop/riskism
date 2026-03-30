@@ -93,6 +93,7 @@ const UI = {
             vietstock_macro: 'Vietstock Macro',
             vietstock_enterprise: 'Vietstock DN',
             vnexpress_business: 'VNExpress Biz',
+            vnexpress_stock: 'VNExpress Stock',
             thanhnien_finance: 'Thanh Nien Biz',
         };
         return map[source] || (source || 'RSS').replace(/_/g, ' ');
@@ -1038,6 +1039,10 @@ const UI = {
     renderPortfolioPerformanceChart(currentValue, totalPnlPct) {
         const ctx = document.getElementById('pf-performance-chart');
         if (!ctx) return;
+        if (typeof window.Chart === 'undefined') {
+            console.warn('[Charts] Chart.js is unavailable. Skipping portfolio performance chart render.');
+            return;
+        }
 
         const dataPoints = [];
         const labels = [];
@@ -1060,65 +1065,69 @@ const UI = {
             this._pfChartInstance.destroy();
         }
 
-        this._pfChartInstance = new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: labels,
-                datasets: [{
-                    label: 'Portfolio Value',
-                    data: dataPoints,
-                    borderColor: '#2563EB',
-                    backgroundColor: 'rgba(37, 99, 235, 0.1)',
-                    borderWidth: 2,
-                    pointRadius: 0,
-                    pointHoverRadius: 4,
-                    fill: true,
-                    tension: 0.3
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { display: false },
-                    tooltip: {
-                        mode: 'index',
-                        intersect: false,
-                        callbacks: {
-                            label: function(context) {
-                                let label = context.dataset.label || '';
-                                if (label) label += ': ';
-                                if (context.parsed.y !== null) {
-                                    label += UI._formatVND(context.parsed.y) + ' ₫';
+        try {
+            this._pfChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Portfolio Value',
+                        data: dataPoints,
+                        borderColor: '#2563EB',
+                        backgroundColor: 'rgba(37, 99, 235, 0.1)',
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        pointHoverRadius: 4,
+                        fill: true,
+                        tension: 0.3
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) label += ': ';
+                                    if (context.parsed.y !== null) {
+                                        label += UI._formatVND(context.parsed.y) + ' ₫';
+                                    }
+                                    return label;
                                 }
-                                return label;
                             }
                         }
-                    }
-                },
-                scales: {
-                    x: {
-                        grid: { display: false },
-                        ticks: { maxTicksLimit: 6 }
                     },
-                    y: {
-                        grid: { borderDash: [2, 4], color: '#E5E7EB' },
-                        position: 'right',
-                        ticks: {
-                            callback: function(value) {
-                                if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M';
-                                return value;
+                    scales: {
+                        x: {
+                            grid: { display: false },
+                            ticks: { maxTicksLimit: 6 }
+                        },
+                        y: {
+                            grid: { borderDash: [2, 4], color: '#E5E7EB' },
+                            position: 'right',
+                            ticks: {
+                                callback: function(value) {
+                                    if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M';
+                                    return value;
+                                }
                             }
                         }
+                    },
+                    interaction: {
+                        mode: 'nearest',
+                        axis: 'x',
+                        intersect: false
                     }
-                },
-                interaction: {
-                    mode: 'nearest',
-                    axis: 'x',
-                    intersect: false
                 }
-            }
-        });
+            });
+        } catch (err) {
+            console.error('[Charts] Failed to render portfolio performance chart:', err);
+        }
     },
 
     pushNotifications(anomalies) {
@@ -1135,7 +1144,7 @@ const UI = {
         const input = document.getElementById('chat-input');
         const msgs = document.getElementById('chat-messages');
 
-        if (!tbtn || !win) return;
+        if (!tbtn || !cbtn || !win || !sendBtn || !input || !msgs) return;
 
         const toggle = () => {
             const isHidden = win.classList.contains('hidden');
