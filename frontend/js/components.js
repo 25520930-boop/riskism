@@ -31,6 +31,42 @@ const UI = {
         }).join('');
     },
 
+    filterAndRenderNews(articles, tab = 'market') {
+        if (!articles || articles.length === 0) return;
+        let filtered;
+        if (tab === 'company') {
+            const portfolioSyms = window._cachedPortfolioSymbols || [];
+            if (portfolioSyms.length === 0) {
+                const feed = document.getElementById('news-feed');
+                if (feed) {
+                    feed.innerHTML = `<div class="empty-msg">Chưa có cổ phiếu nào trong danh mục để lọc company news.</div>`;
+                }
+                return;
+            }
+            filtered = articles.filter(a => {
+                const syms = a.related_symbols || [];
+                return syms.some(s => portfolioSyms.includes(s));
+            });
+        } else {
+            filtered = articles.filter(a => {
+                const syms = a.related_symbols || [];
+                return syms.length === 0 || syms.includes('VNINDEX');
+            });
+        }
+        if (filtered.length === 0) {
+            const feed = document.getElementById('news-feed');
+            if (feed) {
+                feed.innerHTML = `<div class="empty-msg">${
+                    tab === 'company'
+                        ? 'Chưa có tin tức mới cho các mã trong danh mục.'
+                        : 'Không có tin tức nào.'
+                }</div>`;
+            }
+            return;
+        }
+        this.renderNews(filtered);
+    },
+
     _relTime(iso) {
         const diff = Date.now() - new Date(iso).getTime();
         const mins = Math.floor(diff / 60000);
@@ -75,7 +111,10 @@ const UI = {
 
     // ─── AI Card: Auto-populate from real risk data ───
     updateAIFromRisk(stockRisks, portfolioRisk) {
-        if (!stockRisks || Object.keys(stockRisks).length === 0) return;
+        if (!stockRisks || Object.keys(stockRisks).length === 0) {
+            this.resetAI();
+            return;
+        }
 
         const badge = document.getElementById('ai-risk-badge');
         const summary = document.getElementById('ai-summary');
@@ -191,9 +230,18 @@ const UI = {
     updateHoldings(holdings, stockRisks) {
         const tbody = document.getElementById('holdings-tbody');
         if (!tbody) return;
+        const setEl = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
 
         // Empty state
         if (!holdings || holdings.length === 0) {
+            this._prevPrices.clear();
+            setEl('dash-total-value', '0');
+            setEl('dash-total-pnl-pct', '+0.0%');
+            setEl('dash-total-pnl', '0');
+            const pnlPctEl = document.getElementById('dash-total-pnl-pct');
+            if (pnlPctEl) pnlPctEl.className = 'mono';
+            const pnlEl = document.getElementById('dash-total-pnl');
+            if (pnlEl) pnlEl.className = 'mono';
             tbody.innerHTML = `<tr><td colspan="5">
                 <div class="empty-state">
                     <div class="empty-state-icon">📊</div>
@@ -210,7 +258,6 @@ const UI = {
         const totalPnl = totalValue - totalCost;
         const totalPnlPct = totalCost > 0 ? (totalPnl / totalCost * 100) : 0;
 
-        const setEl = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
         setEl('dash-total-value', this._formatVND(totalValue));
         setEl('dash-total-pnl-pct', `${totalPnlPct >= 0 ? '+' : ''}${totalPnlPct.toFixed(1)}%`);
         setEl('dash-total-pnl', `${totalPnl >= 0 ? '+' : ''}${this._formatVND(totalPnl)}`);
@@ -225,8 +272,8 @@ const UI = {
             const latestPrice = h.latest_price || h.avg_price;
             const pnlPct = h.pnl_pct || 0;
             const dailyChange = h.daily_change_pct || 0;
-            const cls = pnlPct >= 0 ? 'up' : 'down';
-            const dailyCls = dailyChange >= 0 ? 'up' : 'down';
+            const cls = pnlPct >= 0 ? 'low' : 'high';
+            const dailyCls = dailyChange >= 0 ? 'low' : 'high';
 
             // Price flash animation
             const prevPrice = this._prevPrices.get(h.symbol);
@@ -236,12 +283,27 @@ const UI = {
             }
             this._prevPrices.set(h.symbol, latestPrice);
 
+            const SECTOR_MAP = {
+                'VCB': 'Banking', 'CTG': 'Banking', 'BID': 'Banking', 'MBB': 'Banking', 'TCB': 'Banking', 'VPB': 'Banking', 'STB': 'Banking',
+                'FPT': 'Technology', 'CMG': 'Technology', 'ELC': 'Technology',
+                'VIC': 'Real Estate', 'VHM': 'Real Estate', 'NVL': 'Real Estate', 'KDH': 'Real Estate', 'NLG': 'Real Estate',
+                'HPG': 'Materials', 'HSG': 'Materials', 'NKG': 'Materials',
+                'SSI': 'Financials', 'VND': 'Financials', 'HCM': 'Financials', 'VCI': 'Financials',
+                'VNM': 'Consumer', 'MSN': 'Consumer', 'SAB': 'Consumer',
+                'GAS': 'Energy', 'PVD': 'Energy', 'PVS': 'Energy',
+                'MWG': 'Retail', 'PNJ': 'Retail', 'FRT': 'Retail'
+            };
+            let displaySector = h.sector;
+            if (!displaySector || displaySector === 'Unknown') {
+                displaySector = SECTOR_MAP[h.symbol] || '';
+            }
+
             return `<tr class="${flashCls}">
-                <td class="ticker-cell">${h.symbol}<span class="ticker-sector">${h.sector || ''}</span></td>
+                <td class="ticker-cell">${h.symbol}<span class="ticker-sector">${displaySector}</span></td>
                 <td class="text-right mono">${this._formatPrice(latestPrice)}</td>
                 <td class="text-right mono">${this._formatVND(marketValue)}</td>
-                <td class="text-right mono ${cls}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%</td>
-                <td class="text-right mono ${dailyCls}">${dailyChange >= 0 ? '+' : ''}${dailyChange.toFixed(1)}%</td>
+                <td class="text-right"><span class="badge badge-risk ${cls} mono" style="font-size: 0.72rem; letter-spacing: normal; text-transform: none; padding: 2px 6px;">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%</span></td>
+                <td class="text-right"><span class="badge badge-risk ${dailyCls} mono" style="font-size: 0.72rem; letter-spacing: normal; text-transform: none; padding: 2px 6px;">${dailyChange >= 0 ? '+' : ''}${dailyChange.toFixed(1)}%</span></td>
             </tr>`;
         }).join('');
     },
@@ -263,6 +325,7 @@ const UI = {
         if (!data) return;
         const { portfolio, portfolio_metrics, capital_advice, stock_risks } = data;
         const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+        const holdings = portfolio?.holdings || [];
 
         // Use real market value if available
         const totalValue = portfolio.total_market_value || portfolio_metrics.total_value || 0;
@@ -280,7 +343,8 @@ const UI = {
         const tierEl = document.getElementById('pf-tier');
         if (tierEl) {
             tierEl.textContent = tier;
-            tierEl.className = `pf-stat-value badge ${tier === 'SMALL' ? 'badge-info' : 'badge-warn'}`;
+            const tierBadge = tier === 'SMALL' ? 'badge-tier-small' : tier === 'WHALE' ? 'badge-tier-whale' : 'badge-tier-medium';
+            tierEl.className = `pf-stat-value badge badge-tier ${tierBadge}`;
         }
 
         const volEl = document.getElementById('pf-vol');
@@ -298,7 +362,9 @@ const UI = {
 
         // Sector bars
         const sectorEl = document.getElementById('sector-bars');
-        if (sectorEl && portfolio_metrics.sector_exposure) {
+        if (sectorEl && holdings.length === 0) {
+            sectorEl.innerHTML = '<div class="empty-msg">Chua co co phieu nao de phan bo nganh.</div>';
+        } else if (sectorEl && portfolio_metrics.sector_exposure) {
             const colors = { Banking: '#2563EB', Technology: '#7C3AED', Industrial: '#F59E0B', 'Real Estate': '#EC4899', Consumer: '#10B981', Energy: '#F97316' };
             sectorEl.innerHTML = Object.entries(portfolio_metrics.sector_exposure).map(([name, pct]) =>
                 `<div class="sector-row">
@@ -312,29 +378,35 @@ const UI = {
         // Capital advice from REAL data
         const advEl = document.getElementById('advice-content');
         if (advEl && capital_advice) {
-            let html = '';
-            if (capital_advice.warnings && capital_advice.warnings.length > 0) {
-                html += capital_advice.warnings.map(w => `<div class="advice-warning">${w}</div>`).join('');
+            if (holdings.length === 0) {
+                advEl.innerHTML = '<div class="empty-msg">Danh muc dang trong. Them co phieu de nhan capital advice.</div>';
+            } else {
+                let html = '';
+                if (capital_advice.warnings && capital_advice.warnings.length > 0) {
+                    html += capital_advice.warnings.map(w => `<div class="advice-warning">${w}</div>`).join('');
+                }
+                if (portfolio.holdings) {
+                    const totalVal = portfolio.total_market_value || 0;
+                    portfolio.holdings.forEach(h => {
+                        const weight = totalVal > 0 ? (h.market_value / totalVal * 100).toFixed(1) : 0;
+                        const pnlSign = (h.pnl_pct || 0) >= 0 ? '+' : '';
+                        const pnlColor = (h.pnl_pct || 0) >= 0 ? 'var(--up)' : 'var(--down)';
+                        html += `<div class="advice-info">📊 <strong>${h.symbol}</strong>: ${weight}% danh mục | P&L: <span style="color:${pnlColor};font-weight:600">${pnlSign}${(h.pnl_pct || 0).toFixed(1)}%</span> | Giá TB: ${(h.avg_price / 1000).toFixed(1)}K → Hiện: ${(h.latest_price / 1000).toFixed(1)}K</div>`;
+                    });
+                }
+                if (capital_advice.suggested_next_symbols && capital_advice.suggested_next_symbols.length) {
+                    html += `<div class="advice-info">💡 Gợi ý đa dạng hóa: <strong>${capital_advice.suggested_next_symbols.join(', ')}</strong></div>`;
+                }
+                html += `<div class="advice-info">🎯 Position size: ~${capital_advice.position_size_pct}% per stock (max ${capital_advice.max_positions} positions)</div>`;
+                advEl.innerHTML = html;
             }
-            // Real position analysis from portfolio data
-            if (portfolio.holdings) {
-                const totalVal = portfolio.total_market_value || 0;
-                portfolio.holdings.forEach(h => {
-                    const weight = totalVal > 0 ? (h.market_value / totalVal * 100).toFixed(1) : 0;
-                    const pnlSign = (h.pnl_pct || 0) >= 0 ? '+' : '';
-                    html += `<div class="advice-info">📊 <strong>${h.symbol}</strong>: ${weight}% danh mục | P&L: ${pnlSign}${(h.pnl_pct || 0).toFixed(1)}% | Giá TB: ${(h.avg_price / 1000).toFixed(1)}K → Hiện: ${(h.latest_price / 1000).toFixed(1)}K</div>`;
-                });
-            }
-            if (capital_advice.suggested_next_symbols && capital_advice.suggested_next_symbols.length) {
-                html += `<div class="advice-info">💡 Gợi ý đa dạng hóa: <strong>${capital_advice.suggested_next_symbols.join(', ')}</strong></div>`;
-            }
-            html += `<div class="advice-info">🎯 Position size: ~${capital_advice.position_size_pct}% per stock (max ${capital_advice.max_positions} positions)</div>`;
-            advEl.innerHTML = html;
         }
 
-        // Full holdings table with real data
+        // Full holdings table
         const ftbody = document.getElementById('full-holdings-tbody');
-        if (ftbody && portfolio.holdings) {
+        if (ftbody && holdings.length === 0) {
+            ftbody.innerHTML = '<tr><td colspan="10"><div class="empty-msg">Chua co vi the nao trong danh muc.</div></td></tr>';
+        } else if (ftbody && portfolio.holdings) {
             ftbody.innerHTML = portfolio.holdings.map(h => {
                 const r = stock_risks ? stock_risks[h.symbol] : {};
                 const rs = r.risk_score || 0;
@@ -342,7 +414,7 @@ const UI = {
                 const latestPrice = h.latest_price || h.avg_price;
                 const marketVal = h.market_value || h.quantity * h.avg_price;
                 const pnlPct = h.pnl_pct || 0;
-                const pnlCls = pnlPct >= 0 ? 'up' : 'down';
+                const pnlCls = pnlPct >= 0 ? 'low' : 'high';
 
                 return `<tr>
                     <td><strong>${h.symbol}</strong></td>
@@ -350,7 +422,7 @@ const UI = {
                     <td class="text-right mono">${this._formatPrice(h.avg_price)}</td>
                     <td class="text-right mono">${this._formatPrice(latestPrice)}</td>
                     <td class="text-right mono">${this._formatVND(marketVal)}</td>
-                    <td class="text-right mono ${pnlCls}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%</td>
+                    <td class="text-right"><span class="badge badge-risk ${pnlCls} mono" style="font-size: 0.72rem; letter-spacing: normal; text-transform: none; padding: 2px 6px;">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%</span></td>
                     <td class="text-right"><span class="risk-pill ${rcls}">${rs}</span></td>
                     <td class="text-right mono">${((r.var_95 || 0) * 100).toFixed(2)}%</td>
                     <td class="text-right mono">${(r.sharpe_ratio || 0).toFixed(2)}</td>
@@ -362,10 +434,15 @@ const UI = {
 
     // ─── Risk Analysis Tab ───────────────────────
     renderRiskAnalysis(riskMetrics, anomalies) {
+        const metrics = riskMetrics || {};
+        const symbols = Object.keys(metrics);
+
         // Heatmap
         const heatmap = document.getElementById('heatmap-grid');
-        if (heatmap && riskMetrics) {
-            heatmap.innerHTML = Object.entries(riskMetrics).map(([sym, m]) => {
+        if (heatmap && symbols.length === 0) {
+            heatmap.innerHTML = '<div class="empty-msg">Chua co co phieu trong danh muc de phan tich rui ro.</div>';
+        } else if (heatmap) {
+            heatmap.innerHTML = Object.entries(metrics).map(([sym, m]) => {
                 const score = m.risk_score || 50;
                 let bg, color;
                 if (score <= 30) { bg = '#F0FDF4'; color = '#16A34A'; }
@@ -376,8 +453,21 @@ const UI = {
             }).join('');
         }
 
-        // Stock detail
-        this.renderStockDetail(Object.keys(riskMetrics || {})[0], riskMetrics);
+        // Dynamically populate stock risk detail dropdown
+        const select = document.getElementById('ra-symbol-select');
+        if (select && symbols.length === 0) {
+            select.innerHTML = '<option value="">No symbols</option>';
+        } else if (select) {
+            const prevSelected = select.value;
+            select.innerHTML = symbols.map(sym =>
+                `<option value="${sym}">${sym}</option>`
+            ).join('');
+            if (symbols.includes(prevSelected)) {
+                select.value = prevSelected;
+            }
+        }
+
+        this.renderStockDetail(select?.value || symbols[0], metrics);
 
         // Anomalies
         const anomFeed = document.getElementById('anomaly-feed');
@@ -398,7 +488,6 @@ const UI = {
     renderCorrelationMatrix(matrix, warnings) {
         const wrap = document.getElementById('correlation-wrap');
         if (!wrap || !matrix) return;
-
         const symbols = Object.keys(matrix);
         if (symbols.length === 0) {
             wrap.innerHTML = '<div class="empty-msg">Không đủ dữ liệu để tính correlation.</div>';
@@ -430,13 +519,16 @@ const UI = {
             warnings.forEach(w => html += `<div class="corr-warn-item">${w}</div>`);
             html += '</div>';
         }
-
         wrap.innerHTML = html;
     },
 
     renderStockDetail(symbol, riskMetrics) {
         const grid = document.getElementById('risk-detail-grid');
-        if (!grid || !riskMetrics || !symbol) return;
+        if (!grid) return;
+        if (!riskMetrics || !symbol) {
+            grid.innerHTML = '<div class="empty-msg">Chon mot co phieu de xem chi tiet rui ro.</div>';
+            return;
+        }
         const m = riskMetrics[symbol] || {};
         const items = [
             ['VaR 95%', ((m.var_95 || 0) * 100).toFixed(2) + '%'],
@@ -476,8 +568,6 @@ const UI = {
 
     renderReflection(ref) {
         if (!ref) return;
-
-        // Old report tab fallback
         const body = document.getElementById('reflection-body');
         if (body) {
             body.innerHTML = `
@@ -489,7 +579,6 @@ const UI = {
             `;
         }
         
-        // New interactive card
         const scoreBadge = document.getElementById('reflection-score');
         const lessonP = document.getElementById('reflection-lesson');
         if (scoreBadge) {
@@ -547,6 +636,62 @@ const UI = {
         }).join('');
     },
 
+    resetAI() {
+        const badge = document.getElementById('ai-risk-badge');
+        const summary = document.getElementById('ai-summary');
+        const signals = document.getElementById('ai-signals');
+        const trends = document.getElementById('ai-trends-body');
+        const fill = document.getElementById('confidence-fill');
+
+        if (badge) {
+            badge.textContent = 'NO HOLDINGS';
+            badge.className = 'badge badge-risk medium';
+        }
+        if (summary) {
+            summary.textContent = 'Danh muc dang trong. Them co phieu de he thong tu dong cap nhat risk insight.';
+        }
+        if (signals) {
+            signals.innerHTML = `
+                <div class="signal-item">
+                    <span class="signal-icon check">✓</span>
+                    <span>Them it nhat mot co phieu de hien thi AI insights theo danh muc moi.</span>
+                </div>
+            `;
+        }
+        if (trends) {
+            trends.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--text-muted)">No symbols</td></tr>';
+        }
+        if (fill) fill.style.width = '0%';
+    },
+
+    setNotifications(anomalies = []) {
+        const list = document.getElementById('notify-list');
+        const dot = document.getElementById('notify-dot');
+        if (!list) return;
+
+        if (!anomalies.length) {
+            list.innerHTML = '<div class="notify-empty">No alerts yet. Run AI Agent to detect anomalies.</div>';
+            if (dot) dot.classList.remove('active');
+            return;
+        }
+
+        if (dot) dot.classList.add('active');
+
+        const icons = { high: '🔴', critical: '🔴', medium: '🟡', low: '🟢' };
+        const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
+        list.innerHTML = anomalies.map(a => {
+            const sev = a.severity || 'medium';
+            return `<div class="notify-item">
+                <div class="notify-icon ${sev}">${icons[sev] || '🟡'}</div>
+                <div class="notify-text">
+                    <div class="notify-text-title">${a.description || a.type}</div>
+                    <div class="notify-text-time">${a.symbol || ''} · ${now}</div>
+                </div>
+            </div>`;
+        }).join('');
+    },
+
     // ─── Toast ───────────────────────────────────
     toast(msg, type = 'info') {
         const wrap = document.getElementById('toast-wrap');
@@ -574,10 +719,9 @@ const UI = {
         const ctx = document.getElementById('pf-performance-chart');
         if (!ctx) return;
 
-        // Generate mock 30-day historical data points based on current value
         const dataPoints = [];
         const labels = [];
-        let runningVal = currentValue / (1 + (totalPnlPct / 100)); // Approximate starting value 30 days ago
+        let runningVal = currentValue / (1 + (totalPnlPct / 100)); 
         
         for (let i = 30; i >= 0; i--) {
             const date = new Date();
@@ -587,7 +731,6 @@ const UI = {
             if (i === 0) {
                 dataPoints.push(currentValue);
             } else {
-                // Add some random walk noise
                 runningVal = runningVal * (1 + (Math.random() * 0.04 - 0.018));
                 dataPoints.push(runningVal);
             }
@@ -658,29 +801,98 @@ const UI = {
         });
     },
 
-    // ─── Notification Panel ─────────────────────────
     pushNotifications(anomalies) {
-        const list = document.getElementById('notify-list');
-        const dot = document.getElementById('notify-dot');
-        if (!list || !anomalies || !anomalies.length) return;
-
-        // Activate pulsing dot
-        if (dot) dot.classList.add('active');
-
-        const icons = { high: '🔴', critical: '🔴', medium: '🟡', low: '🟢' };
-        const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-
-        const html = anomalies.map(a => {
-            const sev = a.severity || 'medium';
-            return `<div class="notify-item">
-                <div class="notify-icon ${sev}">${icons[sev] || '🟡'}</div>
-                <div class="notify-text">
-                    <div class="notify-text-title">${a.description || a.type}</div>
-                    <div class="notify-text-time">${a.symbol || ''} · ${now}</div>
-                </div>
-            </div>`;
-        }).join('');
-
-        list.innerHTML = html;
+        this.setNotifications(anomalies || []);
     },
+
+    // ─── Chatbot Assistant ───────────────────────────────
+    initChatbot() {
+        this.chatHistory = [];
+        const tbtn = document.getElementById('chat-toggle-btn');
+        const cbtn = document.getElementById('chat-close-btn');
+        const win = document.getElementById('chat-window');
+        const sendBtn = document.getElementById('chat-send-btn');
+        const input = document.getElementById('chat-input');
+        const msgs = document.getElementById('chat-messages');
+
+        if (!tbtn || !win) return;
+
+        const toggle = () => {
+            const isHidden = win.classList.contains('hidden');
+            if (isHidden) {
+                win.style.display = 'flex';
+                // Trigger reflow
+                void win.offsetWidth;
+                win.classList.remove('hidden');
+                tbtn.style.display = 'none'; // Hide toggle
+                setTimeout(() => input.focus(), 300);
+            } else {
+                win.classList.add('hidden');
+                setTimeout(() => { 
+                    win.style.display = 'none'; 
+                    tbtn.style.display = 'flex'; // Show toggle
+                }, 300);
+            }
+        };
+
+        tbtn.addEventListener('click', toggle);
+        cbtn.addEventListener('click', toggle);
+
+        const appendMsg = (text, sender) => {
+            const div = document.createElement('div');
+            div.className = `chat-bubble ${sender}`;
+            div.innerHTML = text.replace(/\n/g, '<br/>'); // basic markdown to breakline
+            msgs.appendChild(div);
+            msgs.scrollTop = msgs.scrollHeight;
+        };
+
+        const showTyping = () => {
+            const div = document.createElement('div');
+            div.className = `chat-bubble ai typing`;
+            div.id = 'chat-typing-indicator';
+            div.innerHTML = `<div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>`;
+            msgs.appendChild(div);
+            msgs.scrollTop = msgs.scrollHeight;
+        };
+
+        const hideTyping = () => {
+            const el = document.getElementById('chat-typing-indicator');
+            if (el) el.remove();
+        };
+
+        const sendMessage = async () => {
+            const text = input.value.trim();
+            if (!text) return;
+
+            input.value = '';
+            appendMsg(text, 'user');
+            
+            showTyping();
+            try {
+                // Keep context short
+                if (this.chatHistory.length > 6) {
+                    this.chatHistory = this.chatHistory.slice(-6);
+                }
+                const res = await api.chatAssistant(text, this.chatHistory);
+                hideTyping();
+                
+                if (res && res.reply) {
+                    appendMsg(res.reply, 'ai');
+                    this.chatHistory.push({ sender: 'user', text });
+                    this.chatHistory.push({ sender: 'assistant', text: res.reply });
+                } else {
+                    appendMsg("Xin lỗi, kết nối bị lỗi. Bạn thử lại nhé!", 'ai');
+                }
+            } catch (err) {
+                console.error(err);
+                hideTyping();
+                appendMsg("Hệ thống AI hiện không phản hồi. Bạn thử lại sau nhé!", 'ai');
+            }
+        };
+
+        sendBtn.addEventListener('click', sendMessage);
+        input.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+    }
 };

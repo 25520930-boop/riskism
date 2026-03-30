@@ -20,6 +20,8 @@ class RiskMetrics:
     beta: float            # Beta vs VN-Index
     sharpe_ratio: float    # Sharpe Ratio
     sortino_ratio: float   # Sortino Ratio
+    calmar_ratio: float    # Calmar Ratio (annualized return / max drawdown)
+    information_ratio: float  # Information Ratio (excess return vs benchmark / tracking error)
     max_drawdown: float    # Maximum Drawdown
     drawdown_duration: int # Days from peak to recovery
     volatility: float      # Annualized volatility
@@ -37,6 +39,8 @@ class RiskMetrics:
             'beta': round(self.beta, 4),
             'sharpe_ratio': round(self.sharpe_ratio, 4),
             'sortino_ratio': round(self.sortino_ratio, 4),
+            'calmar_ratio': round(self.calmar_ratio, 4),
+            'information_ratio': round(self.information_ratio, 4),
             'max_drawdown': round(self.max_drawdown, 4),
             'drawdown_duration': self.drawdown_duration,
             'volatility': round(self.volatility, 4),
@@ -150,6 +154,39 @@ def calculate_max_drawdown(prices: np.ndarray) -> Tuple[float, int]:
     return float(max_dd), int(max_dd_duration)
 
 
+def calculate_calmar_ratio(returns: np.ndarray, max_drawdown: float) -> float:
+    """
+    Calmar Ratio: annualized return / maximum drawdown.
+    Higher is better — measures return per unit of drawdown risk.
+    Typically, Calmar > 3 is excellent, < 1 is poor.
+    """
+    if len(returns) == 0 or max_drawdown == 0:
+        return 0.0
+    annualized_return = float(np.mean(returns) * 252)
+    return float(annualized_return / abs(max_drawdown))
+
+
+def calculate_information_ratio(
+    stock_returns: np.ndarray,
+    market_returns: np.ndarray
+) -> float:
+    """
+    Information Ratio: excess return over benchmark / tracking error.
+    Measures consistency of alpha generation vs VN-Index.
+    IR > 0.5 is good, > 1.0 is excellent.
+    """
+    if len(stock_returns) < 2 or len(market_returns) < 2:
+        return 0.0
+    min_len = min(len(stock_returns), len(market_returns))
+    s = stock_returns[-min_len:]
+    m = market_returns[-min_len:]
+    excess = s - m
+    tracking_error = float(np.std(excess))
+    if tracking_error == 0:
+        return 0.0
+    return float(np.mean(excess) / tracking_error * np.sqrt(252))
+
+
 def calculate_volatility(returns: np.ndarray) -> Tuple[float, float]:
     """
     Calculate daily and annualized volatility.
@@ -246,6 +283,8 @@ def compute_all_metrics(
     sharpe = calculate_sharpe_ratio(returns, risk_free_rate)
     sortino = calculate_sortino_ratio(returns, risk_free_rate)
     max_dd, dd_duration = calculate_max_drawdown(prices)
+    calmar = calculate_calmar_ratio(returns, max_dd)
+    info_ratio = calculate_information_ratio(returns, market_returns) if len(market_returns) > 0 else 0.0
     annual_vol, daily_vol = calculate_volatility(returns)
     avg_return = float(np.mean(returns)) if len(returns) > 0 else 0.0
 
@@ -268,6 +307,8 @@ def compute_all_metrics(
         beta=beta,
         sharpe_ratio=sharpe,
         sortino_ratio=sortino,
+        calmar_ratio=calmar,
+        information_ratio=info_ratio,
         max_drawdown=max_dd,
         drawdown_duration=dd_duration,
         volatility=annual_vol,

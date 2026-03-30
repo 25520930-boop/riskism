@@ -70,6 +70,44 @@ class RiskismAPI {
         return await this.get(`/api/market/${symbol}/price`);
     }
 
+    async searchSymbols(query, limit = 8) {
+        const q = (query || '').trim();
+        if (!q) return [];
+        const data = await this.get(`/api/market/symbols/search?q=${encodeURIComponent(q)}&limit=${limit}`);
+        return data?.items || [];
+    }
+
+    async getSymbolReferencePrice(symbol) {
+        const sym = (symbol || '').trim().toUpperCase();
+        if (!sym) return null;
+
+        const live = await this.getLatestPrice(sym);
+        if (live && Number.isFinite(Number(live.price))) {
+            return {
+                ...live,
+                symbol: sym,
+                price: Number(live.price),
+            };
+        }
+
+        const history = await this.get(`/api/market/${sym}?days=2`);
+        const closes = history?.close || [];
+        if (!Array.isArray(closes) || closes.length === 0) {
+            return null;
+        }
+
+        const latest = Number(closes[closes.length - 1]);
+        if (!Number.isFinite(latest)) {
+            return null;
+        }
+
+        return {
+            symbol: sym,
+            price: latest < 1000 ? latest * 1000 : latest,
+            timestamp: new Date().toISOString(),
+        };
+    }
+
     async getMarketIndexSnapshot() {
         const live = await this.getLatestPrice('VNINDEX');
         if (live && Number.isFinite(Number(live.change_pct))) {
@@ -112,10 +150,27 @@ class RiskismAPI {
     }
 
     async updatePortfolio(userId, capital, holdings) {
-        return await this.post(`/api/portfolio/${userId}/update`, {
-            capital_amount: capital,
-            holdings: holdings
-        });
+        try {
+            const res = await fetch(`${API_BASE}/api/portfolio/${userId}/update`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    capital_amount: capital,
+                    holdings: holdings
+                }),
+            });
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+                return {
+                    status: 'error',
+                    detail: data?.detail || `HTTP ${res.status}`,
+                };
+            }
+            return data;
+        } catch (err) {
+            console.warn(`[API] POST /api/portfolio/${userId}/update failed:`, err.message);
+            return null;
+        }
     }
 
     // ─── Insights & News ─────────────────────────────────
@@ -157,6 +212,13 @@ class RiskismAPI {
 
     async getPredictions(userId = 1) {
         return await this.get(`/api/predictions/${userId}`);
+    }
+
+    async chatAssistant(message, history = []) {
+        return await this.post('/api/chat', {
+            message: message,
+            history: history
+        });
     }
 
     // ─── WebSocket ───────────────────────────────────────

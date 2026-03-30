@@ -46,6 +46,9 @@ class RiskismApp {
 
         // Load all data from backend (non-blocking)
         this.loadAllData();
+        
+        // Init features
+        UI.initChatbot();
 
         // Update status bar
         this.updateStatusBar('connected');
@@ -134,7 +137,7 @@ class RiskismApp {
             UI.renderPortfolio(this.portfolioData);
         }
         if (tab === 'risk-analysis' && this.portfolioData) {
-            UI.renderRiskAnalysis(this.portfolioData.stock_risks, []);
+            UI.renderRiskAnalysis(this.portfolioData.stock_risks, this.portfolioData.anomalies || []);
         }
     }
 
@@ -252,6 +255,15 @@ class RiskismApp {
             btn.addEventListener('click', () => {
                 document.querySelectorAll('#news-toggle .toggle-btn').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
+                const tab = btn.dataset.filter || btn.textContent.trim().toLowerCase();
+                const articles = (window._cachedNews && window._cachedNews.length > 0)
+                    ? window._cachedNews
+                    : [];
+                if (articles.length === 0) {
+                    UI.toast('News đang load, thử lại sau vài giây', 'info');
+                    return;
+                }
+                UI.filterAndRenderNews(articles, tab);
             });
         });
     }
@@ -259,8 +271,8 @@ class RiskismApp {
     // ─── Risk Analysis Select ────────────────────
     bindRiskSelect() {
         document.getElementById('ra-symbol-select')?.addEventListener('change', (e) => {
-            const risks = (this.agentResult && this.agentResult.risk_metrics) ||
-                          (this.portfolioData && this.portfolioData.stock_risks);
+            const risks = (this.portfolioData && this.portfolioData.stock_risks) ||
+                          (this.agentResult && (this.agentResult.risk_metrics || this.agentResult.stock_risks));
             if (risks) {
                 UI.renderStockDetail(e.target.value, risks);
             }
@@ -285,19 +297,130 @@ class RiskismApp {
 
         if (!btnEdit || !modal) return;
 
-        const renderEditorRows = (holdings) => {
-            editor.innerHTML = holdings.map((h, i) => `
-                <div class="editor-row" data-idx="${i}" style="display:flex; gap:8px; margin-bottom:8px;">
-                    <input type="text" class="form-input pf-sym" placeholder="Symbol" value="${h.symbol || ''}" style="width:30%" maxlength="3">
-                    <input type="number" class="form-input pf-qty" placeholder="Quantity" value="${h.quantity || 0}" style="width:30%">
-                    <input type="number" class="form-input pf-prc" placeholder="Avg Price" value="${h.avg_price || 0}" style="width:30%">
+        const formatAutoPrice = (price) => {
+            const value = Number(price);
+            if (!Number.isFinite(value) || value <= 0) return '';
+            return Math.round(value).toLocaleString('en-US');
+        };
+
+        const buildEditorRow = (holding = {}, index = 0) => {
+            const autoPrice = holding.latest_price || holding.avg_price || '';
+            return `
+                <div class="editor-row" data-idx="${index}" style="display:grid; grid-template-columns:minmax(0, 1.6fr) minmax(110px, 0.8fr) minmax(130px, 1fr) auto; gap:8px; margin-bottom:10px; align-items:start;">
+                    <div style="display:flex; flex-direction:column; gap:4px; min-width:0;">
+                        <input type="text" class="form-input pf-sym" list="pf-suggestions-${index}" placeholder="Ticker" value="${holding.symbol || ''}" style="width:100%" maxlength="10" autocomplete="off">
+                        <datalist id="pf-suggestions-${index}"></datalist>
+                        <div class="pf-sym-meta" style="font-size:0.72rem; color:var(--text-muted); min-height:16px;">${holding.organ_name || ''}</div>
+                    </div>
+                    <input type="number" class="form-input pf-qty" placeholder="Quantity" value="${holding.quantity || 0}" style="width:100%">
+                    <input type="text" class="form-input pf-prc mono" placeholder="Auto price today" value="${formatAutoPrice(autoPrice)}" style="width:100%" readonly>
                     <button class="btn-outline btn-rm-row" style="padding: 4px 8px;">✕</button>
                 </div>
-            `).join('');
+            `;
+        };
 
-            editor.querySelectorAll('.btn-rm-row').forEach(b => {
-                b.addEventListener('click', (e) => e.target.closest('.editor-row').remove());
+        const attachEditorRowBehavior = (row) => {
+            const symInput = row.querySelector('.pf-sym');
+            const qtyInput = row.querySelector('.pf-qty');
+            const priceInput = row.querySelector('.pf-prc');
+            const metaEl = row.querySelector('.pf-sym-meta');
+            const listEl = row.querySelector('datalist');
+            const removeBtn = row.querySelector('.btn-rm-row');
+            let searchTimer = null;
+            let priceTimer = null;
+
+            const setAutoPrice = async (symbol) => {
+                const sym = (symbol || '').trim().toUpperCase();
+                symInput.value = sym;
+
+                if (!sym) {
+                    priceInput.value = '';
+                    priceInput.dataset.price = '';
+                    return;
+                }
+
+                if (sym.length < 3) {
+                    priceInput.value = '';
+                    priceInput.dataset.price = '';
+                    return;
+                }
+
+                const token = `${Date.now()}-${Math.random()}`;
+                row.dataset.priceToken = token;
+                priceInput.value = 'Loading...';
+                priceInput.dataset.price = '';
+
+                const quote = await api.getSymbolReferencePrice(sym);
+                if (row.dataset.priceToken !== token) return;
+
+                if (quote && Number.isFinite(Number(quote.price))) {
+                    const normalized = Math.round(Number(quote.price));
+                    priceInput.value = formatAutoPrice(normalized);
+                    priceInput.dataset.price = String(normalized);
+                } else {
+                    priceInput.value = 'N/A';
+                    priceInput.dataset.price = '';
+                }
+            };
+
+            const setSuggestions = async () => {
+                const q = (symInput.value || '').trim().toUpperCase();
+                symInput.value = q;
+
+                if (!q) {
+                    listEl.innerHTML = '';
+                    metaEl.textContent = '';
+                    priceInput.value = '';
+                    priceInput.dataset.price = '';
+                    return;
+                }
+
+                const items = await api.searchSymbols(q, 8);
+                if ((symInput.value || '').trim().toUpperCase() !== q) return;
+
+                listEl.innerHTML = items.map(item =>
+                    `<option value="${item.symbol}" label="${item.organ_name || ''}"></option>`
+                ).join('');
+
+                const exact = items.find(item => item.symbol === q);
+                if (exact) {
+                    metaEl.textContent = exact.organ_name || '';
+                } else if (items.length > 0) {
+                    metaEl.textContent = `Gợi ý: ${items.map(item => item.symbol).join(', ')}`;
+                } else {
+                    metaEl.textContent = 'Không tìm thấy mã phù hợp';
+                }
+            };
+
+            symInput.addEventListener('input', () => {
+                clearTimeout(searchTimer);
+                clearTimeout(priceTimer);
+                searchTimer = setTimeout(() => { setSuggestions(); }, 160);
+                priceTimer = setTimeout(() => { setAutoPrice(symInput.value); }, 240);
             });
+
+            symInput.addEventListener('change', () => {
+                setSuggestions();
+                setAutoPrice(symInput.value);
+            });
+
+            qtyInput.addEventListener('input', () => {
+                if ((parseInt(qtyInput.value, 10) || 0) < 0) {
+                    qtyInput.value = 0;
+                }
+            });
+
+            removeBtn.addEventListener('click', () => row.remove());
+
+            if (symInput.value) {
+                setSuggestions();
+                setAutoPrice(symInput.value);
+            }
+        };
+
+        const renderEditorRows = (holdings) => {
+            editor.innerHTML = holdings.map((h, i) => buildEditorRow(h, i)).join('');
+            editor.querySelectorAll('.editor-row').forEach(attachEditorRowBehavior);
         };
 
         btnEdit.addEventListener('click', () => {
@@ -314,48 +437,109 @@ class RiskismApp {
         btnAdd.addEventListener('click', () => {
             const row = document.createElement('div');
             row.className = 'editor-row';
-            row.style = "display:flex; gap:8px; margin-bottom:8px;";
-            row.innerHTML = `
-                <input type="text" class="form-input pf-sym" placeholder="Symbol" style="width:30%" maxlength="3">
-                <input type="number" class="form-input pf-qty" placeholder="Quantity" style="width:30%">
-                <input type="number" class="form-input pf-prc" placeholder="Avg Price" style="width:30%">
-                <button class="btn-outline btn-rm-row" style="padding: 4px 8px;">✕</button>
-            `;
-            row.querySelector('.btn-rm-row').addEventListener('click', () => row.remove());
+            row.innerHTML = buildEditorRow({}, Date.now());
             editor.appendChild(row);
+            attachEditorRowBehavior(row);
         });
 
         btnSave.addEventListener('click', async () => {
             const cap = parseFloat(inputCap.value) || 0;
             const rows = editor.querySelectorAll('.editor-row');
-            const holdings = [];
+            const holdingsMap = new Map();
+            let saveSucceeded = false;
             rows.forEach(r => {
                 const sym = r.querySelector('.pf-sym').value.trim().toUpperCase();
                 const qty = parseInt(r.querySelector('.pf-qty').value) || 0;
-                const prc = parseFloat(r.querySelector('.pf-prc').value) || 0;
                 if (sym && qty > 0) {
-                    holdings.push({ symbol: sym, quantity: qty, avg_price: prc });
+                    holdingsMap.set(sym, (holdingsMap.get(sym) || 0) + qty);
                 }
             });
+            const holdings = Array.from(holdingsMap.entries()).map(([symbol, quantity]) => ({ symbol, quantity }));
 
             btnSave.textContent = 'Saving...';
             btnSave.disabled = true;
             try {
                 const res = await api.updatePortfolio(this.userId, cap, holdings);
-                if (res && res.status === 'success') {
-                    UI.toast('Portfolio updated successfully', 'success');
-                    modal.classList.remove('active');
-                    this.loadAllData(); // Reload data
-                } else {
-                    UI.toast('Failed to save portfolio', 'error');
+                if (!res || res.status !== 'success') {
+                    UI.toast(res?.detail || 'Failed to save portfolio', 'error');
+                    return;
                 }
+
+                saveSucceeded = true;
+                UI.toast('Portfolio updated successfully', 'success');
+                modal.classList.remove('active');
+
+                const port = await this._fetchWithTimeout(
+                    api.getPortfolioRisk(this.userId),
+                    this.API_TIMEOUT
+                );
+                if (port) {
+                    this.applyPortfolioSnapshot(port);
+                    return;
+                }
+
+                this.loadAllData();
+                UI.toast('Portfolio đã lưu. Đang đồng bộ lại dữ liệu...', 'info');
             } catch (e) {
-                UI.toast('Server error while saving portfolio', 'error');
+                if (saveSucceeded) {
+                    console.warn('[Portfolio] Saved but refresh failed:', e?.message || e);
+                    this.loadAllData();
+                    UI.toast('Portfolio đã lưu. Đang đồng bộ lại dữ liệu...', 'info');
+                } else {
+                    UI.toast('Server error while saving portfolio', 'error');
+                }
             } finally {
                 btnSave.textContent = 'Save Portfolio & Reload';
                 btnSave.disabled = false;
             }
         });
+    }
+
+    getActiveNewsFilter() {
+        return document.querySelector('#news-toggle .toggle-btn.active')?.dataset.filter || 'market';
+    }
+
+    refreshNewsForCurrentPortfolio() {
+        if (!window._cachedNews || window._cachedNews.length === 0) return;
+        UI.filterAndRenderNews(window._cachedNews, this.getActiveNewsFilter());
+    }
+
+    applyPortfolioSnapshot(port) {
+        this.portfolioData = port;
+
+        const holdings = port?.portfolio?.holdings || [];
+        const stockRisks = port?.stock_risks || {};
+        const anomalies = port?.anomalies || [];
+        const hasHoldings = holdings.length > 0;
+        const fallbackMetrics = {
+            var_95: 0,
+            sharpe_ratio: 0,
+            max_drawdown: 0,
+            beta: 0,
+        };
+        const flatHistory = {
+            var_95: [0, 0],
+            sharpe: [0, 0],
+            drawdown: [0, 0],
+            beta: [0, 0],
+        };
+
+        window._cachedPortfolioSymbols = holdings.map(h => h.symbol);
+
+        UI.updateHoldings(holdings, stockRisks);
+        UI.updateMetrics(port?.portfolio_risk || fallbackMetrics, port?.metrics_history || flatHistory);
+
+        if (hasHoldings) {
+            UI.updateAIFromRisk(stockRisks, port?.portfolio_risk || fallbackMetrics);
+        } else {
+            UI.resetAI();
+        }
+
+        UI.renderRiskAnalysis(stockRisks, anomalies);
+        UI.renderCorrelationMatrix(port?.correlation_matrix || {}, port?.correlation_warnings || []);
+        UI.renderPortfolio(port);
+        UI.setNotifications(anomalies);
+        this.refreshNewsForCurrentPortfolio();
     }
 
     // ─── Data Loaders ────────────────────────────
@@ -365,7 +549,10 @@ class RiskismApp {
         // Load news
         this._fetchWithTimeout(api.getNews(), this.API_TIMEOUT)
             .then(news => {
-                if (news && news.articles) UI.renderNews(news.articles);
+                if (news && news.articles) {
+                    window._cachedNews = news.articles;  // Cache để filter sau
+                    UI.renderNews(news.articles);
+                }
             })
             .catch(e => {
                 console.warn('[Dashboard] News load failed:', e.message);
@@ -380,27 +567,7 @@ class RiskismApp {
                 this.API_TIMEOUT
             );
             if (port) {
-                this.portfolioData = port;
-
-                // Dashboard: Holdings with real prices
-                UI.updateHoldings(port.portfolio.holdings, port.stock_risks);
-                UI.updateMetrics(port.portfolio_risk, port.metrics_history);
-
-                // AI Insights: Auto-populate from real risk data
-                UI.updateAIFromRisk(port.stock_risks, port.portfolio_risk);
-
-                // Pre-populate Risk Analysis tab with real stock risks + anomalies
-                if (port.stock_risks && Object.keys(port.stock_risks).length > 0) {
-                    UI.renderRiskAnalysis(port.stock_risks, port.anomalies || []);
-                }
-
-                // Correlation matrix
-                if (port.correlation_matrix) {
-                    UI.renderCorrelationMatrix(port.correlation_matrix, port.correlation_warnings || []);
-                }
-
-                // Pre-populate Portfolio tab
-                UI.renderPortfolio(port);
+                this.applyPortfolioSnapshot(port);
             }
         } catch (e) {
             console.warn('[Dashboard] Portfolio load failed:', e.message);

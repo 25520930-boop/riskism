@@ -2,6 +2,7 @@ from backend.risk_engine.core_metrics import (
     compute_all_metrics, RiskMetrics,
     calculate_var, calculate_cvar, calculate_beta,
     calculate_sharpe_ratio, calculate_sortino_ratio,
+    calculate_calmar_ratio, calculate_information_ratio,
     calculate_max_drawdown, calculate_returns,
     compute_rolling_metrics, compute_portfolio_risk_summary,
 )
@@ -22,5 +23,6 @@ __all__ = [
     'scan_all_anomalies', 'Anomaly',
     'calculate_var', 'calculate_cvar', 'calculate_beta',
     'calculate_sharpe_ratio', 'calculate_sortino_ratio',
+    'calculate_calmar_ratio', 'calculate_information_ratio',
     'calculate_max_drawdown', 'calculate_returns',
 ]

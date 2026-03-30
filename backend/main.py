@@ -95,6 +95,10 @@ class AgentTriggerRequest(BaseModel):
     analysis_type: str = "morning"
     symbol: Optional[str] = None
 
+class ChatMessageRequest(BaseModel):
+    message: str
+    history: List[dict] = []
+
 
 # ─── Rate Limiter ────────────────────────────────────────
 class RateLimiter:
@@ -260,6 +264,73 @@ def _build_vnindex_snapshot(index_data: Optional[dict]) -> Optional[dict]:
     }
 
 
+def _normalize_stock_price(raw_price: Optional[float]) -> Optional[float]:
+    if raw_price is None:
+        return None
+    price = float(raw_price)
+    return price * 1000 if price < 1000 else price
+
+
+async def _get_stock_reference_snapshot(symbol: str) -> Optional[dict]:
+    intraday = await asyncio.to_thread(vnstock.get_intraday_price, symbol)
+    if intraday and intraday.get('price') is not None:
+        price = _normalize_stock_price(intraday.get('price'))
+        open_price = _normalize_stock_price(intraday.get('open'))
+        high_price = _normalize_stock_price(intraday.get('high'))
+        low_price = _normalize_stock_price(intraday.get('low'))
+        change = None
+        if price is not None and open_price not in (None, 0):
+            change = round(price - open_price, 2)
+        return {
+            **intraday,
+            'symbol': symbol,
+            'price': price,
+            'open': open_price,
+            'high': high_price,
+            'low': low_price,
+            'change': change if change is not None else intraday.get('change'),
+        }
+
+    historical = await vnstock.get_historical_data_async(symbol, days=2)
+    closes = historical.get('close', []) if historical else []
+    if not closes:
+        return None
+
+    latest_close = _normalize_stock_price(closes[-1])
+    previous_close = _normalize_stock_price(closes[-2]) if len(closes) > 1 else latest_close
+    if latest_close is None or previous_close is None:
+        return None
+
+    volumes = historical.get('volume', []) if historical else []
+    latest_volume = int(volumes[-1]) if volumes else 0
+    change = latest_close - previous_close
+    return {
+        'symbol': symbol,
+        'price': latest_close,
+        'previous_close': previous_close,
+        'open': previous_close,
+        'high': latest_close,
+        'low': latest_close,
+        'volume': latest_volume,
+        'change': round(change, 2),
+        'change_pct': round((change / previous_close) * 100, 2) if previous_close > 0 else 0,
+        'timestamp': datetime.now().isoformat(),
+    }
+
+
+@app.get("/api/market/symbols/search")
+async def search_market_symbols(
+    q: str = Query(default="", min_length=1),
+    limit: int = Query(default=8, ge=1, le=20),
+):
+    items = await vnstock.search_symbols_async(q, limit)
+    return {
+        'items': items,
+        'query': q,
+        'total': len(items),
+    }
+
+
 @app.get("/api/market/{symbol}")
 async def get_market_data(symbol: str, days: int = Query(default=180, le=365)):
     """Get historical market data for a symbol."""
@@ -292,7 +363,7 @@ async def get_latest_price(symbol: str):
             index_data = await vnstock.get_market_index_async(days=2)
             data = _build_vnindex_snapshot(index_data)
     else:
-        data = await asyncio.to_thread(vnstock.get_intraday_price, symbol)
+        data = await _get_stock_reference_snapshot(symbol)
     if not data:
         raise HTTPException(status_code=404, detail=f"No price data for {symbol}")
     return data
@@ -302,7 +373,7 @@ async def get_latest_price(symbol: str):
 class HoldingInput(BaseModel):
     symbol: str
     quantity: int
-    avg_price: float
+    avg_price: Optional[float] = None
 
 class PortfolioUpdateRequest(BaseModel):
     capital_amount: float
@@ -326,23 +397,42 @@ async def update_portfolio(user_id: int, request: PortfolioUpdateRequest):
         
         # Clear old holdings
         db.execute(text("DELETE FROM portfolios WHERE user_id = :uid"), {"uid": user_id})
-        
+
+        normalized_holdings = {}
+        for h in request.holdings:
+            symbol = h.symbol.upper().strip()
+            if symbol and h.quantity > 0:
+                normalized_holdings[symbol] = normalized_holdings.get(symbol, 0) + h.quantity
+
         # Insert new holdings
-        if request.holdings:
-            for h in request.holdings:
-                if h.quantity > 0:
-                    db.execute(text(
-                        "INSERT INTO portfolios (user_id, symbol, quantity, avg_price, sector) "
-                        "VALUES (:uid, :sym, :qty, :prc, 'Unknown')"
-                    ), {
-                        "uid": user_id, "sym": h.symbol.upper(),
-                        "qty": h.quantity, "prc": h.avg_price
-                    })
+        if normalized_holdings:
+            symbols = list(normalized_holdings.keys())
+            snapshots = await asyncio.gather(
+                *[_get_stock_reference_snapshot(symbol) for symbol in symbols]
+            )
+            for symbol, snapshot in zip(symbols, snapshots):
+                if not snapshot or snapshot.get('price') is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Không lấy được giá hiện tại cho mã {symbol}"
+                    )
+                resolved_price = float(snapshot['price'])
+                db.execute(text(
+                    "INSERT INTO portfolios (user_id, symbol, quantity, avg_price, sector) "
+                    "VALUES (:uid, :sym, :qty, :prc, 'Unknown')"
+                ), {
+                    "uid": user_id,
+                    "sym": symbol,
+                    "qty": normalized_holdings[symbol],
+                    "prc": resolved_price
+                })
         
         db.commit()
         return {"status": "success"}
     except Exception as e:
         db.rollback()
+        if isinstance(e, HTTPException):
+            raise e
         print(f"[PORTFOLIO FALLBACK] DB error, mock success: {e}")
         
         # MOCK PORTFOLIO IN AGENT STATE for demonstration
@@ -350,7 +440,12 @@ async def update_portfolio(user_id: int, request: PortfolioUpdateRequest):
             'risk_appetite': 'moderate',
             'capital_amount': request.capital_amount,
             'holdings': [
-                {'symbol': h.symbol.upper(), 'quantity': h.quantity, 'avg_price': h.avg_price, 'sector': 'Unknown'}
+                {
+                    'symbol': h.symbol.upper(),
+                    'quantity': h.quantity,
+                    'avg_price': float((await _get_stock_reference_snapshot(h.symbol.upper()) or {}).get('price') or 0),
+                    'sector': 'Unknown'
+                }
                 for h in request.holdings if h.quantity > 0
             ]
         }
@@ -576,6 +671,23 @@ async def get_predictions(user_id: int):
         'reflection': agent.state.get('reflection'),
     }
 
+# --- Chatbot Assistance ---
+@app.post("/api/chat")
+async def chat_endpoint(request: ChatMessageRequest):
+    """Handle newbie chat requests from frontend."""
+    try:
+        if not request.message.strip():
+            return {"reply": "Vui lòng nhập câu hỏi nhé!"}
+        
+        reply = await asyncio.to_thread(
+            agent.llm.chat_assistant, 
+            request.message, 
+            request.history
+        )
+        return {"reply": reply}
+    except Exception as e:
+        print(f"[chat_endpoint] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ─── WebSocket ───────────────────────────────────────────
 

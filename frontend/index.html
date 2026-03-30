@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=DM+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/styles.css?v=8">
+    <link rel="stylesheet" href="css/styles.css?v=9">
 </head>
 <body>
     <!-- ═══ TOP BAR: Brand + Market Tabs + Live Ticker ═══ -->
@@ -451,11 +451,34 @@
         </div>
     </div>
 
+    <!-- Chat Widget -->
+    <div id="chat-widget" class="chat-widget">
+        <button id="chat-toggle-btn" class="chat-toggle-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+        </button>
+        <div id="chat-window" class="chat-window hidden">
+            <div class="chat-header">
+                <div>
+                    <h3 style="margin: 0; font-size: 0.95rem;">Riskism Assistant</h3>
+                    <span style="font-size: 0.7rem; font-weight: normal; color: rgba(255,255,255,0.8);">Hỏi đáp thuật ngữ rủi ro</span>
+                </div>
+                <button id="chat-close-btn" class="icon-btn" style="color: white;">✕</button>
+            </div>
+            <div id="chat-messages" class="chat-messages">
+                <div class="chat-bubble ai">Xin chào! 👋 Mình là trợ lý AI Riskism. Mình ở đây để giúp newbie hiểu rõ các thuật ngữ như VaR, CVaR, Sharpe, hoặc Agentic Reflection Loop. Bạn cứ hỏi nhé!</div>
+            </div>
+            <div class="chat-input-area">
+                <input type="text" id="chat-input" placeholder="Nhập câu hỏi..." autocomplete="off" />
+                <button id="chat-send-btn" class="btn-primary" style="padding: 0 12px;">Gửi</button>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-    <script src="js/api.js?v=8"></script>
-    <script src="js/charts.js?v=8"></script>
-    <script src="js/components.js?v=8"></script>
-    <script src="js/app.js?v=8"></script>
+    <script src="js/api.js?v=9"></script>
+    <script src="js/charts.js?v=9"></script>
+    <script src="js/components.js?v=9"></script>
+    <script src="js/app.js?v=9"></script>
 </body>
 </html>

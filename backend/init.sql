@@ -91,6 +91,24 @@ CREATE TABLE IF NOT EXISTS risk_snapshots (
     calculated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Morning Predictions (persisted pre-market forecast)
+CREATE TABLE IF NOT EXISTS morning_predictions (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    prediction_type VARCHAR(20) NOT NULL DEFAULT 'morning',
+    content JSONB NOT NULL DEFAULT '{}',
+    predicted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Reflections (self-evaluation results)
+CREATE TABLE IF NOT EXISTS reflections (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    morning_prediction_id INTEGER REFERENCES morning_predictions(id) ON DELETE SET NULL,
+    content JSONB NOT NULL DEFAULT '{}',
+    evaluated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 -- ============================================
 -- Indexes for performance
 -- ============================================
@@ -102,6 +120,8 @@ CREATE INDEX IF NOT EXISTS idx_insights_user_type ON insights(user_id, insight_t
 CREATE INDEX IF NOT EXISTS idx_insights_created ON insights(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_predictions_user ON predictions(user_id, predicted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_risk_snapshots_user ON risk_snapshots(user_id, calculated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_morning_predictions_user ON morning_predictions(user_id, predicted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reflections_user ON reflections(user_id, evaluated_at DESC);
 
 -- ============================================
 -- Seed default user

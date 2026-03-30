@@ -2,7 +2,7 @@
 
 ![Riskism Status](https://img.shields.io/badge/Status-v3.1_Production_Ready-success?style=for-the-badge&logo=fastapi)
 ![Architecture](https://img.shields.io/badge/Architecture-Multi--Agent_Loop-7C3AED?style=for-the-badge&logo=openai)
-![AI Engine](https://img.shields.io/badge/AI_Engine-Gemini_Flash_%2F_Pro_+_Claude_Routing-blue?style=for-the-badge&logo=google-gemini)
+![AI Engine](https://img.shields.io/badge/AI_Engine-Gemini_Flash_%2F_Pro_Routing-blue?style=for-the-badge&logo=google-gemini)
 ![Infrastructure](https://img.shields.io/badge/Infrastructure-FastAPI_+_PostgreSQL_+_Redis_+_Celery-FF4B4B?style=for-the-badge&logo=docker)
 
 **RISKISM** không chỉ là một công cụ theo dõi thị trường; đây là một nền tảng **Agentic AI** tự động hóa quy trình quản trị rủi ro chuyên sâu cho nhà đầu tư cá nhân tại Việt Nam. Dự án tập trung vào việc kết hợp giữa **LLM Reasoning** và **Modern Portfolio Theory (MPT)** để đưa ra các quyết định đầu tư có trọng số rủi ro.
@@ -25,10 +25,10 @@
 
 ## 🏗️ Kiến trúc Công nghệ (Multi-LLM Routing)
 
-Hệ thống được thiết kế để tận dụng tối đa thế mạnh của từng mô hình ngôn ngữ lớn:
-- **Gemini 2.0 Flash**: Chịu trách nhiệm xử lý các tác vụ tốc độ cao (Classification & Sentiment scoring).
-- **Gemini 2.0 Pro / Claude 3.5 Sonnet**: Đảm nhiệm vai trò Agent Orchestrator cho các tác vụ lập luận phức tạp (Reasoning, Reflection).
-- **Llama 3 (via Groq/Together)**: Tối ưu hóa cho việc xử lý các structured data tools.
+Hệ thống được thiết kế với kiến trúc **2-Tier LLM Router**, tận dụng tối đa thế mạnh của từng mô hình:
+- **Gemini 2.0 Flash** (`fast` tier): Chịu trách nhiệm xử lý các tác vụ tốc độ cao — Classification, Sentiment scoring, Entity extraction. Tối ưu cho throughput.
+- **Gemini 2.0 Pro** (`reasoning` tier): Đảm nhiệm vai trò Agent Orchestrator cho các tác vụ lập luận phức tạp — Insight generation, Morning prediction, Self-reflection.
+- **Auto-fallback**: Nếu tier `reasoning` thất bại, hệ thống tự động retry với `flash` tier + mock response để đảm bảo không bị gián đoạn.
 
 ---
 
@@ -60,10 +60,10 @@ Agent được trang bị 10 công cụ tự động hóa hoàn toàn quy trình
 ## 📈 Risk Engine - Phân tích Tài chính Chuyên sâu
 
 Vượt xa các chỉ số cơ bản, RISKISM cung cấp bộ chỉ số rủi ro chuẩn định chế tài chính:
-- **Tail Risk**: CVaR 95/99 (Conditional VaR), VaR Adjusted VN (T+2 settlement cycle).
+- **Tail Risk**: CVaR 95/99 (Conditional VaR), VaR 95/99 (Historical Percentile).
 - **Performance Ratios**: Sharpe, Sortino, Calmar, Information Ratio.
-- **Diversification**: HHI Index (độ tập trung), Effective N (số mã thực tế đóng đóng góp vào rủi ro).
-- **Market Regimes**: Tự động chuyển đổi kịch bản phân tích theo trạng thái thị trường (**Normal / Stress / Crisis**).
+- **Diversification**: HHI Index (độ tập trung), Effective N (số mã thực tế đóng góp vào rủi ro).
+- **Market Regimes**: Tự động chuyển đổi kịch bản phân tích theo trạng thái thị trường (**Normal / Stress / High / Extreme**).
 - **Vietnam Specifics**: Kiểm tra Lô tối thiểu (Min lot 100) và so sánh Sector Exposure vs VN30.
 
 ---

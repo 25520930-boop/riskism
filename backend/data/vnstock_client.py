@@ -237,6 +237,67 @@ class VnstockClient:
             print(f"[VnstockClient] VN-Index snapshot error: {e}")
             return None
 
+    def get_all_symbols(self) -> List[Dict]:
+        """Fetch full symbol universe for autocomplete."""
+        cache_key = "symbols:all"
+        cached = self._get_cache(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        if not VNSTOCK_AVAILABLE:
+            return []
+
+        try:
+            listing = Vnstock().stock(symbol='VCB', source='VCI').listing
+            df = listing.all_symbols()
+            if df is None or df.empty:
+                return []
+
+            result = []
+            for _, row in df.iterrows():
+                symbol = str(row.get('symbol', '')).strip().upper()
+                organ_name = str(row.get('organ_name', '')).strip()
+                if symbol:
+                    result.append({
+                        'symbol': symbol,
+                        'organ_name': organ_name,
+                    })
+
+            self._set_cache(cache_key, json.dumps(result), 86400)
+            return result
+        except Exception as e:
+            print(f"[VnstockClient] Symbol universe error: {e}")
+            return []
+
+    def search_symbols(self, query: str, limit: int = 8) -> List[Dict]:
+        """Search symbols from cached vnstock listing data."""
+        q = (query or '').strip().upper()
+        if not q:
+            return []
+
+        symbols = self.get_all_symbols()
+        ranked = []
+        for item in symbols:
+            symbol = item.get('symbol', '')
+            organ_name = item.get('organ_name', '')
+            organ_upper = organ_name.upper()
+
+            if symbol.startswith(q):
+                rank = 0
+            elif q in symbol:
+                rank = 1
+            elif q in organ_upper:
+                rank = 2
+            else:
+                continue
+
+            alpha_penalty = 0 if symbol.isalpha() else 1
+            length_penalty = abs(len(symbol) - 3)
+            ranked.append((rank, alpha_penalty, length_penalty, symbol, item))
+
+        ranked.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+        return [item for _, _, _, _, item in ranked[:limit]]
+
     # ─── Async Wrappers ──────────────────────────────
 
     async def get_historical_data_async(self, symbol: str, days: int = 180) -> Optional[Dict]:
@@ -250,6 +311,10 @@ class VnstockClient:
     async def get_market_index_snapshot_async(self) -> Optional[Dict]:
         """Async wrapper for latest VN-Index snapshot."""
         return await asyncio.to_thread(self.get_market_index_snapshot)
+
+    async def search_symbols_async(self, query: str, limit: int = 8) -> List[Dict]:
+        """Async wrapper for symbol search."""
+        return await asyncio.to_thread(self.search_symbols, query, limit)
 
     async def fetch_multiple_async(self, symbols: List[str], days: int = 180) -> Dict:
         """Fetch data for multiple symbols + VNINDEX concurrently."""

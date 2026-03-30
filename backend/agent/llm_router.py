@@ -30,7 +30,7 @@ class LLMRouter:
         # Multi-LLM Routing Map (Match Proposal)
         self.models = {
             "fast": "gemini-2.0-flash",           # For news sentiment, entity extraction
-            "reasoning": "gemini-2.0-pro-exp",    # For complex insight generation
+            "reasoning": "gemini-2.0-flash",    # For complex insight generation
             "fallback": "gemini-2.0-flash"
         }
 
@@ -288,7 +288,8 @@ Tạo dự báo phiên sáng (JSON):
                 'reasoning': 'Chưa đủ dữ liệu để dự báo chính xác',
                 'key_risks': [],
                 'watch_symbols': [],
-            }
+            },
+            model_tier="reasoning"
         )
 
     def self_reflect(self, prediction: Dict, actual_result: Dict) -> Dict:
@@ -324,12 +325,44 @@ Phân tích (JSON):
                 'what_was_wrong': 'Đang phân tích',
                 'lesson_learned': 'Cần thêm dữ liệu',
                 'improvement_suggestion': 'Thu thập thêm dữ liệu',
-            }
+            },
+            model_tier="reasoning"
+        )
+
+    def chat_assistant(self, message: str, history: list) -> str:
+        """Handle chatbot assistance specifically for terms and explanations."""
+        system = (
+            "Bạn là 'Riskism Assistant', một trợ lý AI thân thiện chuyên giải thích các thuật ngữ "
+            "về tài chính, quản trị rủi ro chứng khoán và dự án Riskism (như VaR, CVaR, Sharpe Ratio, HHI, "
+            "Agentic Reflection, Capital Tier, Vol Regime) cho người dùng mới (newbie). "
+            "Nguyên tắc:\n"
+            "1. Luôn trả lời bằng tiếng Việt, thân thiện, dễ hiểu, dùng ngôn ngữ sinh động.\n"
+            "2. Trả lời NGẮN GỌN (dưới 150 chữ).\n"
+            "3. Nếu người dùng hỏi các chủ đề không liên quan đến tài chính, chứng khoán hoặc ứng dụng này (ví dụ: code, lập trình, sức khoẻ, cá nhân), "
+            "hãy khéo léo từ chối và nhắc họ rằng bạn chỉ hỗ trợ giải thích thuật ngữ Riskism."
+        )
+
+        # Build prompt from history
+        context = ""
+        for h in history[-5:]: # Only keep last 5 for context
+            if h.get('sender') == 'user':
+                context += f"\nUser: {h.get('text')}"
+            else:
+                context += f"\nAssistant: {h.get('text')}"
+                
+        prompt = f"Lịch sử trò chuyện gần đây:\n{context}\n\nUser: {message}\nAssistant:"
+        
+        return self._call_gemini(
+            prompt, system,
+            temperature=0.4,
+            model_tier="fast"
         )
 
     def _mock_response(self, prompt: str) -> str:
         """Generate mock response when Gemini is not available."""
-        if 'sentiment' in prompt.lower():
+        if 'assistant:' in prompt.lower():
+            return "Xin lỗi, hiện tại AI backend đang tắt hoặc thiếu API Key! Lời nhắc: VaR là Value at Risk nhé!"
+        elif 'sentiment' in prompt.lower():
             return json.dumps({
                 'score': 0.2,
                 'label': 'hơi tích cực',

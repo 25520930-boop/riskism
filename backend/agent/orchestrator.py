@@ -236,21 +236,101 @@ class AgentOrchestrator:
         self.state['latest_insight'] = insight
         return insight
 
-    def tool_save_morning_prediction(self, prediction: Dict) -> Dict:
-        """Tool 9: Save morning prediction."""
-        self.log('INSIGHT', 'Saving morning prediction')
+    def tool_save_morning_prediction(self, prediction: Dict, user_id: int = 1) -> Dict:
+        """Tool 9: Save morning prediction to DB + state."""
+        self.log('INSIGHT', 'Saving morning prediction to DB')
         prediction['predicted_at'] = datetime.now().isoformat()
         prediction['prediction_type'] = 'morning'
         self.state['morning_prediction'] = prediction
+
+        # Persist to DB
+        from backend.database import SyncSessionLocal
+        from sqlalchemy import text
+        db = None
+        try:
+            db = SyncSessionLocal()
+            result = db.execute(
+                text(
+                    "INSERT INTO morning_predictions (user_id, prediction_type, content) "
+                    "VALUES (:uid, 'morning', :content) RETURNING id"
+                ),
+                {"uid": user_id, "content": json.dumps(prediction)}
+            )
+            prediction_id = result.fetchone()[0]
+            db.commit()
+            prediction['db_id'] = prediction_id
+            self.state['morning_prediction_db_id'] = prediction_id
+            self.log('INSIGHT', f'Morning prediction saved to DB with id={prediction_id}')
+        except Exception as e:
+            self.log('ERROR', f'Failed to save morning prediction to DB: {e}')
+        finally:
+            if db:
+                db.close()
+
         return prediction
 
-    def tool_evaluate_predictions(self, prediction: Dict, actual: Dict) -> Dict:
-        """Tool 10: Self-reflection."""
+    def tool_evaluate_predictions(self, prediction: Dict, actual: Dict, user_id: int = 1) -> Dict:
+        """Tool 10: Self-reflection — compare prediction vs actual, persist to DB."""
         self.log('FEEDBACK', 'Self-reflection: evaluating prediction accuracy')
         reflection = self.llm.self_reflect(prediction, actual)
         reflection['evaluated_at'] = datetime.now().isoformat()
         self.state['reflection'] = reflection
+
+        # Persist to DB
+        from backend.database import SyncSessionLocal
+        from sqlalchemy import text
+        db = None
+        try:
+            db = SyncSessionLocal()
+            morning_prediction_id = self.state.get('morning_prediction_db_id')
+            db.execute(
+                text(
+                    "INSERT INTO reflections (user_id, morning_prediction_id, content) "
+                    "VALUES (:uid, :mpid, :content)"
+                ),
+                {
+                    "uid": user_id,
+                    "mpid": morning_prediction_id,
+                    "content": json.dumps(reflection)
+                }
+            )
+            db.commit()
+            self.log('FEEDBACK', 'Reflection saved to DB')
+        except Exception as e:
+            self.log('ERROR', f'Failed to save reflection to DB: {e}')
+        finally:
+            if db:
+                db.close()
+
         return reflection
+
+    def _load_morning_prediction_from_db(self, user_id: int) -> Dict:
+        """Load latest morning prediction from DB for a user."""
+        from backend.database import SyncSessionLocal
+        from sqlalchemy import text
+        db = None
+        try:
+            db = SyncSessionLocal()
+            result = db.execute(
+                text(
+                    "SELECT id, content FROM morning_predictions "
+                    "WHERE user_id = :uid "
+                    "ORDER BY predicted_at DESC LIMIT 1"
+                ),
+                {"uid": user_id}
+            ).fetchone()
+            if result:
+                content = result[1] if isinstance(result[1], dict) else json.loads(result[1])
+                content['db_id'] = result[0]
+                self.state['morning_prediction_db_id'] = result[0]
+                self.log('FEEDBACK', f'Loaded morning prediction from DB id={result[0]}')
+                return content
+        except Exception as e:
+            self.log('ERROR', f'Failed to load morning prediction from DB: {e}')
+        finally:
+            if db:
+                db.close()
+        return {}
 
     # ─── AGENTIC LOOPS ─────────────────────────────────
 
@@ -357,7 +437,7 @@ class AgentOrchestrator:
 
         # === INSIGHT PHASE ===
         saved_insight = self.tool_save_insight(insight)
-        saved_prediction = self.tool_save_morning_prediction(prediction)
+        saved_prediction = self.tool_save_morning_prediction(prediction, user_id)
 
         elapsed = time.time() - start_time
         self.log('COMPLETE', f'✅ Morning analysis completed in {elapsed:.1f}s')
@@ -400,10 +480,15 @@ class AgentOrchestrator:
                     ),
                 }
 
+        # Load morning prediction — từ state nếu có, fallback về DB
+        morning_pred = self.state.get('morning_prediction')
+        if not morning_pred:
+            self.log('FEEDBACK', 'State empty, loading morning prediction from DB')
+            morning_pred = self._load_morning_prediction_from_db(user_id)
+
         # Self-reflection
-        morning_pred = self.state.get('morning_prediction', {})
         reflection = await asyncio.to_thread(
-            self.tool_evaluate_predictions, morning_pred, actual_result
+            self.tool_evaluate_predictions, morning_pred, actual_result, user_id
         )
 
         risk_metrics = self.tool_calculate_risk_metrics(symbols)
@@ -419,6 +504,7 @@ class AgentOrchestrator:
                 'capital_amount': portfolio.get('capital_amount', 0),
             },
         )
+
         afternoon_insight['insight_type'] = 'afternoon_review'
         self.tool_save_insight(afternoon_insight)
 

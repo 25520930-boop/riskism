@@ -40,16 +40,18 @@ app.conf.beat_schedule = {
 @app.task(bind=True, name='backend.tasks.celery_app.run_morning_analysis')
 def run_morning_analysis(self):
     """Celery task: Morning analysis."""
+    import asyncio
     from backend.agent.orchestrator import AgentOrchestrator
     agent = AgentOrchestrator()
-    result = agent.run_morning_analysis(user_id=1)
+    result = asyncio.run(agent.run_morning_analysis(user_id=1))
     return {'status': 'completed', 'insight_title': result.get('insight', {}).get('title', '')}
 
 
 @app.task(bind=True, name='backend.tasks.celery_app.run_afternoon_review')
 def run_afternoon_review(self):
     """Celery task: Afternoon review with self-reflection."""
+    import asyncio
     from backend.agent.orchestrator import AgentOrchestrator
     agent = AgentOrchestrator()
-    result = agent.run_afternoon_review(user_id=1)
+    result = asyncio.run(agent.run_afternoon_review(user_id=1))
     return {'status': 'completed', 'accuracy': result.get('reflection', {}).get('accuracy_score', 0)}
