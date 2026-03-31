@@ -189,9 +189,68 @@ const UI = {
         return { label: 'Defensive', className: 'defensive' };
     },
 
+    _isBenchmarkSymbol(symbol) {
+        const normalized = String(symbol || '').trim().toUpperCase();
+        return ['VNINDEX', 'VN-INDEX', 'VN30', 'VN30INDEX', 'HNXINDEX', 'HNX30', 'UPCOM', 'UPCOMINDEX'].includes(normalized);
+    },
+
+    _getRenderableStockRiskEntries(stockRisks) {
+        return Object.entries(stockRisks || {}).filter(([symbol, metrics]) =>
+            !this._isBenchmarkSymbol(symbol) && metrics && typeof metrics === 'object'
+        );
+    },
+
+    _buildTrendRowsFromStockRisk(stockRisks) {
+        return this._getRenderableStockRiskEntries(stockRisks)
+            .sort((a, b) => (b[1]?.risk_score || 0) - (a[1]?.risk_score || 0))
+            .slice(0, 3)
+            .map(([symbol, metrics]) => {
+                const score = Math.round(this._toFiniteNumber(metrics?.risk_score, 50));
+                return {
+                    ticker: symbol,
+                    trend: score >= 65 ? 'down' : score <= 40 ? 'up' : 'neutral',
+                    conf: score,
+                };
+            });
+    },
+
+    _isGenericInsight(insight) {
+        const summary = String(insight?.summary || '').toLowerCase();
+        const findings = Array.isArray(insight?.key_findings)
+            ? insight.key_findings.map(item => String(item || '').toLowerCase())
+            : [];
+        const markers = [
+            'đang thu thập',
+            'đang phân tích',
+            'đang cập nhật',
+            'cập nhật dữ liệu',
+            'hệ thống đang',
+        ];
+        const genericSummary = !summary || markers.some(marker => summary.includes(marker));
+        const genericFindings = findings.length === 0 || findings.every(text => markers.some(marker => text.includes(marker)));
+        const confidence = this._toFiniteNumber(insight?.confidence_score, 0.5);
+        const trends = Array.isArray(insight?.trends) ? insight.trends : [];
+        const benchmarkOnly = trends.length > 0 && trends.every(item => this._isBenchmarkSymbol(item?.ticker));
+        return (genericSummary && genericFindings) || (benchmarkOnly && confidence <= 0.65);
+    },
+
+    _clipText(text, maxLength = 180) {
+        const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+        if (normalized.length <= maxLength) return normalized;
+        return `${normalized.slice(0, maxLength - 1).trim()}…`;
+    },
+
     // ─── AI Insights ─────────────────────────────
-    renderAI(insight) {
+    renderAI(insight, stockRisks = null, portfolioRisk = null) {
         if (!insight) return;
+        const liveStockRisks = stockRisks || window.app?.portfolioData?.stock_risks || {};
+        const livePortfolioRisk = portfolioRisk || window.app?.portfolioData?.portfolio_risk || {};
+        const stockEntries = this._getRenderableStockRiskEntries(liveStockRisks);
+        if (stockEntries.length && this._isGenericInsight(insight)) {
+            this.updateAIFromRisk(liveStockRisks, livePortfolioRisk);
+            return;
+        }
+
         const badge = document.getElementById('ai-risk-badge');
         const summary = document.getElementById('ai-summary');
         const signals = document.getElementById('ai-signals');
@@ -203,17 +262,31 @@ const UI = {
             badge.textContent = this._formatBadgeText(`${lvl} risk`);
             badge.className = `badge badge-risk ${lvl}`;
         }
-        if (summary) summary.textContent = insight.summary || '';
+        if (summary) summary.textContent = this._clipText(insight.summary || '', 175);
         if (fill) fill.style.width = ((insight.confidence_score || 0.5) * 100) + '%';
 
-        if (signals && insight.key_findings) {
-            signals.innerHTML = insight.key_findings.slice(0, 3).map((f, i) =>
+        if (signals) {
+            const findingItems = [...new Set((insight.key_findings || []).map(item => this._clipText(item, 120)).filter(Boolean))];
+            signals.innerHTML = findingItems.slice(0, 3).map(f =>
                 `<div class="signal-item"><span class="signal-icon check">✓</span><span>${f}</span></div>`
             ).join('');
         }
 
-        if (trends && insight.trends) {
-            trends.innerHTML = insight.trends.map(t => {
+        if (trends) {
+            const allowedSymbols = new Set(stockEntries.map(([symbol]) => symbol));
+            let trendItems = Array.isArray(insight.trends)
+                ? insight.trends.filter(item => {
+                    const ticker = String(item?.ticker || '').trim().toUpperCase();
+                    if (!ticker || this._isBenchmarkSymbol(ticker)) return false;
+                    return allowedSymbols.size === 0 || allowedSymbols.has(ticker);
+                })
+                : [];
+
+            if (!trendItems.length) {
+                trendItems = this._buildTrendRowsFromStockRisk(liveStockRisks);
+            }
+
+            trends.innerHTML = trendItems.map(t => {
                 const cls = t.trend === 'up' ? 'up' : t.trend === 'down' ? 'down' : 'neutral';
                 const arrow = t.trend === 'up' ? '↑' : t.trend === 'down' ? '↓' : '—';
                 return `<tr><td>${t.ticker}</td><td class="${cls}">${arrow}</td><td class="text-right mono">${t.conf}%</td></tr>`;
@@ -223,7 +296,8 @@ const UI = {
 
     // ─── AI Card: Auto-populate from real risk data ───
     updateAIFromRisk(stockRisks, portfolioRisk) {
-        if (!stockRisks || Object.keys(stockRisks).length === 0) {
+        const stockEntries = this._getRenderableStockRiskEntries(stockRisks);
+        if (!stockEntries.length) {
             this.resetAI();
             return;
         }
@@ -235,7 +309,7 @@ const UI = {
         const fill = document.getElementById('confidence-fill');
 
         // Determine portfolio risk level from actual data
-        const avgRisk = Object.values(stockRisks).reduce((s, r) => s + (r.risk_score || 50), 0) / Object.keys(stockRisks).length;
+        const avgRisk = stockEntries.reduce((sum, [, risk]) => sum + (risk.risk_score || 50), 0) / stockEntries.length;
         const level = avgRisk > 70 ? 'high' : avgRisk > 45 ? 'medium' : 'low';
         if (badge) {
             badge.textContent = this._formatBadgeText(`${level} risk`);
@@ -244,39 +318,38 @@ const UI = {
 
         // Summary from real metrics
         if (summary) {
-            const highRiskStocks = Object.entries(stockRisks).filter(([_, r]) => (r.risk_score || 0) > 60);
-            const lowRiskStocks = Object.entries(stockRisks).filter(([_, r]) => (r.risk_score || 0) <= 40);
-            let text = `Danh mục ở mức rủi ro ${level === 'high' ? 'CAO' : level === 'medium' ? 'TRUNG BÌNH' : 'THẤP'} (avg: ${avgRisk.toFixed(0)}/100). `;
+            const highRiskStocks = stockEntries.filter(([_, risk]) => (risk.risk_score || 0) > 60);
+            let text = `Danh mục đang ở mức rủi ro ${level === 'high' ? 'CAO' : level === 'medium' ? 'TRUNG BÌNH' : 'THẤP'} (avg ${avgRisk.toFixed(0)}/100). `;
             if (highRiskStocks.length > 0) {
-                text += `${highRiskStocks.map(([s]) => s).join(', ')} có rủi ro cao cần theo dõi. `;
+                text += `${highRiskStocks.map(([symbol]) => symbol).join(', ')} đang là nhóm cần theo dõi sát. `;
             }
             if (portfolioRisk) {
                 const dd = Math.abs(this._toFiniteNumber(portfolioRisk.max_drawdown, 0) * 100);
-                if (dd > 15) text += `Max drawdown ${dd.toFixed(1)}% — mức nguy hiểm.`;
+                if (dd > 15) text += `Max drawdown ${dd.toFixed(1)}% đang ở vùng nhạy cảm.`;
             }
-            summary.textContent = text;
+            summary.textContent = this._clipText(text, 175);
         }
 
         // Signals from real data
         if (signals) {
             const signalItems = [];
-            Object.entries(stockRisks).forEach(([sym, r]) => {
-                if ((r.risk_score || 0) > 60) signalItems.push(`${sym}: Risk Score ${r.risk_score}/100 — cần giảm tỷ trọng`);
-                else if ((r.sharpe_ratio || 0) > 0.5) signalItems.push(`${sym}: Sharpe ${this._formatDecimal(r.sharpe_ratio, 2)} — hiệu quả sinh lời tốt`);
-                else signalItems.push(`${sym}: Beta ${this._formatDecimal(r.beta, 2)}, Vol ${(this._toFiniteNumber(r.volatility, 0) * 100).toFixed(0)}%`);
+            stockEntries.forEach(([symbol, risk]) => {
+                if ((risk.risk_score || 0) > 60) signalItems.push(`${symbol}: Risk Score ${risk.risk_score}/100, cần kiểm soát tỷ trọng`);
+                else if ((risk.sharpe_ratio || 0) > 0.5) signalItems.push(`${symbol}: Sharpe ${this._formatDecimal(risk.sharpe_ratio, 2)}, hiệu quả sinh lời tốt`);
+                else signalItems.push(`${symbol}: Beta ${this._formatDecimal(risk.beta, 2)}, Vol ${(this._toFiniteNumber(risk.volatility, 0) * 100).toFixed(0)}%`);
             });
-            signals.innerHTML = signalItems.slice(0, 3).map(f =>
+            signals.innerHTML = [...new Set(signalItems)].slice(0, 3).map(f =>
                 `<div class="signal-item"><span class="signal-icon check">✓</span><span>${f}</span></div>`
             ).join('');
         }
 
         // Trends from risk scores
         if (trends) {
-            trends.innerHTML = Object.entries(stockRisks).map(([sym, r]) => {
-                const score = r.risk_score || 0;
+            trends.innerHTML = stockEntries.map(([symbol, risk]) => {
+                const score = risk.risk_score || 0;
                 const cls = score <= 40 ? 'up' : score <= 65 ? 'neutral' : 'down';
                 const label = score <= 40 ? 'Low' : score <= 65 ? 'Med' : 'High';
-                return `<tr><td>${sym}</td><td class="${cls}">${label}</td><td class="text-right mono">${score}</td></tr>`;
+                return `<tr><td>${symbol}</td><td class="${cls}">${label}</td><td class="text-right mono">${score}</td></tr>`;
             }).join('');
         }
 
@@ -1317,7 +1390,8 @@ const UI = {
                 if (this.chatHistory.length > 6) {
                     this.chatHistory = this.chatHistory.slice(-6);
                 }
-                const res = await api.chatAssistant(text, this.chatHistory);
+                const chatContext = window.app?.getChatContext ? window.app.getChatContext() : {};
+                const res = await api.chatAssistant(text, this.chatHistory, chatContext);
                 hideTyping();
                 
                 if (res && res.reply) {

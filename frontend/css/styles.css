@@ -365,7 +365,8 @@ body.auth-active {
     display: block;
     margin-top: 2px;
 }
-.text-right { text-align: right; }
+.text-right { text-align: right !important; }
+.text-center { text-align: center !important; }
 .mono { font-family: var(--mono); font-weight: 500; }
 .up { color: var(--up); }
 .down { color: var(--down); }

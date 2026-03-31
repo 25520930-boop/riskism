@@ -11,14 +11,16 @@ import hmac
 import hashlib
 import secrets
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Request, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field
+from jose import JWTError, jwt
 from sqlalchemy import text
 from backend.database import SyncSessionLocal
 
@@ -28,10 +30,22 @@ from backend.data.vnstock_client import VnstockClient
 from backend.firebase_auth import get_firebase_public_config, verify_firebase_id_token
 from backend.risk_engine.capital_aware import SECTOR_MAP
 
+try:
+    from slowapi import Limiter
+    from slowapi.errors import RateLimitExceeded
+    from slowapi.util import get_remote_address
+    SLOWAPI_AVAILABLE = True
+except ImportError:
+    Limiter = None
+    RateLimitExceeded = None
+    SLOWAPI_AVAILABLE = False
+
 settings = get_settings()
 
 PASSWORD_ITERATIONS = 310000
 PASSWORD_MIN_LENGTH = 8
+JWT_ALGORITHM = "HS256"
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 LOCAL_USERNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{1,30}[a-z0-9])?$")
 DEMO_USER_PASSWORD_HASH = "pbkdf2_sha256$310000$9c3f4ec51f8ae5ff27b1e978df3f98b0$e623f55994dab0705f4080292443eb20a0dbc2292fd62a675aafb4cdffe0bb0a"
 
@@ -110,6 +124,35 @@ app.add_middleware(
 )
 
 
+if SLOWAPI_AVAILABLE and RateLimitExceeded is not None:
+    @app.exception_handler(RateLimitExceeded)
+    async def rate_limit_exceeded_handler(request: Request, exc):
+        retry_after = None
+        headers = getattr(exc, "headers", {}) or {}
+        if headers.get("Retry-After") is not None:
+            retry_after = headers.get("Retry-After")
+        elif getattr(exc, "retry_after", None) is not None:
+            retry_after = getattr(exc, "retry_after")
+
+        try:
+            retry_seconds = int(float(retry_after)) if retry_after is not None else 60
+        except (TypeError, ValueError):
+            retry_seconds = 60
+        return _rate_limit_response(retry_seconds)
+
+
+@app.middleware("http")
+async def fallback_rate_limit_middleware(request: Request, call_next):
+    if SLOWAPI_AVAILABLE:
+        return await call_next(request)
+
+    limiter_for_request = _fallback_rate_limiter_for_request(request)
+    client_ip = request.client.host if request.client else "unknown"
+    if not limiter_for_request.is_allowed(client_ip):
+        return _rate_limit_response(limiter_for_request.retry_after(client_ip))
+    return await call_next(request)
+
+
 # ─── Global Error Handler ────────────────────────────────
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
@@ -122,17 +165,22 @@ async def global_exception_handler(request, exc):
 
 # ─── Pydantic Models ────────────────────────────────────
 class AgentTriggerRequest(BaseModel):
-    user_id: int = 1
     analysis_type: str = "morning"
     symbol: Optional[str] = None
 
 class ChatMessageRequest(BaseModel):
     message: str
-    history: List[dict] = []
+    history: List[dict] = Field(default_factory=list)
+    app_context: Dict = Field(default_factory=dict)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
 
 
 # ─── Rate Limiter ────────────────────────────────────────
-class RateLimiter:
+class SlidingWindowRateLimiter:
     """Simple in-memory sliding window rate limiter."""
     def __init__(self, max_calls: int = 3, window_seconds: int = 60):
         self.max_calls = max_calls
@@ -159,7 +207,40 @@ class RateLimiter:
         oldest = min(self._calls[key])
         return max(0, int(self.window - (_time.time() - oldest)))
 
-agent_rate_limiter = RateLimiter(max_calls=3, window_seconds=60)
+
+def _noop_limit(*args, **kwargs):
+    def decorator(func):
+        return func
+    return decorator
+
+
+limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"]) if SLOWAPI_AVAILABLE else None
+limit_decorator = limiter.limit if limiter else _noop_limit
+general_rate_limiter = SlidingWindowRateLimiter(max_calls=60, window_seconds=60)
+auth_rate_limiter = SlidingWindowRateLimiter(max_calls=10, window_seconds=60)
+agent_rate_limiter = SlidingWindowRateLimiter(max_calls=5, window_seconds=60)
+
+if limiter:
+    app.state.limiter = limiter
+
+
+def _rate_limit_response(retry_after: int) -> JSONResponse:
+    retry_seconds = max(1, int(retry_after or 1))
+    return JSONResponse(
+        status_code=429,
+        content={"detail": f"Rate limit exceeded. Try again in {retry_seconds}s."},
+        headers={"Retry-After": str(retry_seconds)},
+    )
+
+
+def _fallback_rate_limiter_for_request(request: Request) -> SlidingWindowRateLimiter:
+    path = request.url.path
+    method = request.method.upper()
+    if method == "POST" and path == "/api/agent/trigger":
+        return agent_rate_limiter
+    if method == "POST" and path in {"/api/auth/login", "/api/auth/signup"}:
+        return auth_rate_limiter
+    return general_rate_limiter
 
 
 # ─── Background Tasks ───────────────────────────────────
@@ -616,6 +697,88 @@ def _verify_password(password: str, stored_hash: str) -> bool:
     except Exception:
         return False
 
+
+auth_scheme = HTTPBearer(auto_error=False)
+
+
+def _unauthorized(detail: str = "Not authenticated") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _create_access_token(user_id: int, username: str, auth_provider: str = "local") -> str:
+    now = datetime.utcnow()
+    payload = {
+        "sub": str(user_id),
+        "username": username,
+        "auth_provider": auth_provider,
+        "iat": now,
+        "exp": now + timedelta(minutes=JWT_ACCESS_TOKEN_EXPIRE_MINUTES),
+    }
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=JWT_ALGORITHM)
+
+
+def _build_token_response(user_id: int, username: str, auth_provider: str = "local") -> Dict[str, str]:
+    return {
+        "access_token": _create_access_token(user_id, username, auth_provider),
+        "token_type": "bearer",
+    }
+
+
+def _load_current_user_sync(user_id: int) -> Optional[Dict]:
+    db = None
+    try:
+        db = SyncSessionLocal()
+        _ensure_local_auth_columns(db)
+        _ensure_firebase_user_columns(db)
+        db.commit()
+        row = db.execute(
+            text(
+                "SELECT id, username, capital_amount, firebase_uid, email "
+                "FROM users WHERE id = :uid"
+            ),
+            {"uid": user_id},
+        ).fetchone()
+        if not row:
+            return None
+        auth_provider = "firebase" if row[3] else "local"
+        return {
+            "user_id": int(row[0]),
+            "username": row[1],
+            "capital_amount": float(row[2] or 0),
+            "auth_provider": auth_provider,
+            "display_name": row[1],
+            "email": row[4],
+        }
+    except Exception as e:
+        print(f"[AUTH] Failed to load current user {user_id}: {e}")
+        return None
+    finally:
+        if db:
+            db.close()
+
+
+async def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(auth_scheme),
+) -> Dict:
+    if not credentials or credentials.scheme.lower() != "bearer":
+        raise _unauthorized()
+
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload.get("sub"))
+    except (JWTError, TypeError, ValueError):
+        raise _unauthorized("Invalid or expired token")
+
+    user = await asyncio.to_thread(_load_current_user_sync, user_id)
+    if not user:
+        raise _unauthorized("User not found")
+    return user
+
 def _slugify_username(value: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9_]+", "_", (value or "").strip().lower())
     normalized = re.sub(r"_+", "_", normalized).strip("_")
@@ -650,10 +813,11 @@ def _ensure_unique_username(db, base_username: str) -> str:
     return username
 
 @app.post("/api/auth/login")
-async def login(request: LoginRequest):
+@limit_decorator("10/minute")
+async def login(request: Request, credentials: LoginRequest):
     """Authenticate a local account using username + password."""
-    username = _validate_local_username(request.username)
-    password = _validate_local_password(request.password)
+    username = _validate_local_username(credentials.username)
+    password = _validate_local_password(credentials.password)
 
     db = SyncSessionLocal()
     try:
@@ -683,14 +847,7 @@ async def login(request: LoginRequest):
         if not _verify_password(password, user[3]):
             raise HTTPException(status_code=401, detail="Incorrect password.")
 
-        return {
-            "user_id": user[0],
-            "username": user[1],
-            "capital_amount": user[2],
-            "is_new": False,
-            "auth_provider": "local",
-            "display_name": user[1],
-        }
+        return _build_token_response(user[0], user[1], auth_provider="local")
     except HTTPException:
         raise
     except Exception as e:
@@ -701,10 +858,11 @@ async def login(request: LoginRequest):
         db.close()
 
 @app.post("/api/auth/signup")
-async def signup(request: SignupRequest):
+@limit_decorator("10/minute")
+async def signup(request: Request, credentials: SignupRequest):
     """Create a local account using username + password."""
-    username = _validate_local_username(request.username)
-    password = _validate_local_password(request.password)
+    username = _validate_local_username(credentials.username)
+    password = _validate_local_password(credentials.password)
 
     db = SyncSessionLocal()
     try:
@@ -737,15 +895,7 @@ async def signup(request: SignupRequest):
                 {"password_hash": password_hash, "user_id": existing_user[0]},
             )
             db.commit()
-            return {
-                "user_id": existing_user[0],
-                "username": existing_user[1],
-                "capital_amount": existing_user[2],
-                "is_new": False,
-                "auth_provider": "local",
-                "display_name": existing_user[1],
-                "upgraded_legacy": True,
-            }
+            return _build_token_response(existing_user[0], existing_user[1], auth_provider="local")
 
         result = db.execute(
             text(
@@ -756,14 +906,7 @@ async def signup(request: SignupRequest):
         )
         user_id = result.fetchone()[0]
         db.commit()
-        return {
-            "user_id": user_id,
-            "username": username,
-            "capital_amount": 0,
-            "is_new": True,
-            "auth_provider": "local",
-            "display_name": username,
-        }
+        return _build_token_response(user_id, username, auth_provider="local")
     except HTTPException:
         db.rollback()
         raise
@@ -824,15 +967,7 @@ async def firebase_login(request: FirebaseLoginRequest):
                 },
             )
             db.commit()
-            return {
-                "user_id": user[0],
-                "username": user[1],
-                "capital_amount": user[2],
-                "is_new": False,
-                "auth_provider": "firebase",
-                "email": email,
-                "display_name": display_name or user[1],
-            }
+            return _build_token_response(user[0], user[1], auth_provider="firebase")
 
         username = _ensure_unique_username(db, _pick_username_seed(decoded, request.username_hint))
         result = db.execute(
@@ -849,15 +984,7 @@ async def firebase_login(request: FirebaseLoginRequest):
         )
         user_id = result.fetchone()[0]
         db.commit()
-        return {
-            "user_id": user_id,
-            "username": username,
-            "capital_amount": 0,
-            "is_new": True,
-            "auth_provider": "firebase",
-            "email": email,
-            "display_name": display_name or username,
-        }
+        return _build_token_response(user_id, username, auth_provider="firebase")
     except HTTPException:
         raise
     except Exception as e:
@@ -868,6 +995,11 @@ async def firebase_login(request: FirebaseLoginRequest):
         db.close()
 
 
+@app.get("/api/auth/me")
+async def auth_me(current_user: Dict = Depends(get_current_user)):
+    return current_user
+
+
 # --- Market Data ---
 def _build_vnindex_snapshot(index_data: Optional[dict]) -> Optional[dict]:
     """Build a latest-price style snapshot for VNINDEX from recent closes."""
@@ -875,6 +1007,9 @@ def _build_vnindex_snapshot(index_data: Optional[dict]) -> Optional[dict]:
         return None
 
     closes = index_data.get('close') or []
+    opens = index_data.get('open') or []
+    highs = index_data.get('high') or []
+    lows = index_data.get('low') or []
     if not closes:
         return None
 
@@ -888,9 +1023,9 @@ def _build_vnindex_snapshot(index_data: Optional[dict]) -> Optional[dict]:
         'symbol': 'VNINDEX',
         'price': latest_close,
         'previous_close': previous_close,
-        'open': previous_close,
-        'high': latest_close,
-        'low': latest_close,
+        'open': float(opens[-1]) if opens else previous_close,
+        'high': float(highs[-1]) if highs else latest_close,
+        'low': float(lows[-1]) if lows else latest_close,
         'volume': latest_volume,
         'change': round(change, 2),
         'change_pct': round((change / previous_close) * 100, 2) if previous_close > 0 else 0,
@@ -919,20 +1054,22 @@ async def _get_stock_reference_snapshot(symbol: str) -> Optional[dict]:
 
     if intraday and intraday.get('price') is not None:
         price = _normalize_stock_price(intraday.get('price'))
+        previous_close = _normalize_stock_price(intraday.get('previous_close'))
         open_price = _normalize_stock_price(intraday.get('open'))
         high_price = _normalize_stock_price(intraday.get('high'))
         low_price = _normalize_stock_price(intraday.get('low'))
-        change = None
-        if price is not None and open_price not in (None, 0):
-            change = round(price - open_price, 2)
+        change = intraday.get('change')
+        if change is not None:
+            change = round(float(change) * (1000 if abs(float(change)) < 1000 else 1), 2)
         return {
             **intraday,
             'symbol': symbol,
             'price': price,
+            'previous_close': previous_close,
             'open': open_price,
             'high': high_price,
             'low': low_price,
-            'change': change if change is not None else intraday.get('change'),
+            'change': change,
         }
 
     historical = None
@@ -1046,9 +1183,13 @@ class PortfolioUpdateRequest(BaseModel):
     capital_amount: float
     holdings: List[HoldingInput]
 
-@app.post("/api/portfolio/{user_id}/update")
-async def update_portfolio(user_id: int, request: PortfolioUpdateRequest):
+@app.post("/api/portfolio/update")
+async def update_portfolio(
+    request: PortfolioUpdateRequest,
+    current_user: Dict = Depends(get_current_user),
+):
     """Update user capital and portfolio holdings."""
+    user_id = int(current_user["user_id"])
     db = SyncSessionLocal()
     try:
         # Check user exists
@@ -1170,13 +1311,14 @@ async def update_portfolio(user_id: int, request: PortfolioUpdateRequest):
     finally:
         db.close()
 
-@app.get("/api/portfolio/{user_id}")
-async def get_portfolio(user_id: int):
+@app.get("/api/portfolio")
+async def get_portfolio(current_user: Dict = Depends(get_current_user)):
+    user_id = int(current_user["user_id"])
     return await agent.tool_get_portfolio(user_id)
 
 
-@app.get("/api/portfolio/{user_id}/risk")
-async def get_portfolio_risk(user_id: int):
+@app.get("/api/portfolio/risk")
+async def get_portfolio_risk(current_user: Dict = Depends(get_current_user)):
     """
     Get comprehensive portfolio risk analysis with REAL market prices.
     V3.1: Enriches holdings with latest prices from vnstock for real PnL.
@@ -1188,6 +1330,7 @@ async def get_portfolio_risk(user_id: int):
         build_sector_benchmark_exposure,
     )
 
+    user_id = int(current_user["user_id"])
     portfolio = await agent.tool_get_portfolio(user_id)
     symbols = [h['symbol'] for h in portfolio['holdings']]
 
@@ -1309,8 +1452,9 @@ async def get_portfolio_risk(user_id: int):
 
 
 # --- Insights ---
-@app.get("/api/insights/{user_id}")
-async def get_latest_insights(user_id: int):
+@app.get("/api/insights")
+async def get_latest_insights(current_user: Dict = Depends(get_current_user)):
+    user_id = int(current_user["user_id"])
     state = auto_agent_state[user_id]
     latest_result = state.get('latest_result') or {}
     insight = latest_result.get('insight') or latest_result.get('afternoon_insight')
@@ -1364,21 +1508,19 @@ async def get_latest_news(limit: int = Query(default=20, le=50)):
 
 # --- Agent ---
 @app.post("/api/agent/trigger")
-async def trigger_agent(request: AgentTriggerRequest, req: Request):
-    """Manually trigger agent analysis. Rate limited: 3 calls per 60s."""
-    client_ip = req.client.host if req.client else "unknown"
-    if not agent_rate_limiter.is_allowed(client_ip):
-        retry = agent_rate_limiter.retry_after(client_ip)
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded. Try again in {retry}s.",
-            headers={"Retry-After": str(retry)}
-        )
+@limit_decorator("5/minute")
+async def trigger_agent(
+    request: Request,
+    payload: AgentTriggerRequest,
+    current_user: Dict = Depends(get_current_user),
+):
+    """Manually trigger agent analysis."""
     try:
+        user_id = int(current_user["user_id"])
         result = await _execute_agent_analysis(
-            request.user_id,
-            request.analysis_type,
-            symbol=request.symbol,
+            user_id,
+            payload.analysis_type,
+            symbol=payload.symbol,
             trigger_source='manual',
         )
         return result
@@ -1392,7 +1534,8 @@ async def trigger_agent(request: AgentTriggerRequest, req: Request):
 
 
 @app.get("/api/agent/status")
-async def get_agent_status(user_id: int = Query(default=1)):
+async def get_agent_status(current_user: Dict = Depends(get_current_user)):
+    user_id = int(current_user["user_id"])
     state = auto_agent_state[user_id]
     return {
         'status': 'running' if state.get('running') else 'ready',
@@ -1408,8 +1551,9 @@ async def get_agent_status(user_id: int = Query(default=1)):
 
 
 # --- Predictions ---
-@app.get("/api/predictions/{user_id}")
-async def get_predictions(user_id: int):
+@app.get("/api/predictions")
+async def get_predictions(current_user: Dict = Depends(get_current_user)):
+    user_id = int(current_user["user_id"])
     state = auto_agent_state[user_id]
     latest_result = state.get('latest_result') or {}
     morning_prediction = latest_result.get('prediction')
@@ -1430,9 +1574,45 @@ async def get_predictions(user_id: int):
         'reflection': reflection,
     }
 
+@app.get("/api/predictions/history")
+async def get_predictions_history(
+    limit: int = 10,
+    current_user: Dict = Depends(get_current_user),
+):
+    user_id = int(current_user["user_id"])
+    db = None
+    try:
+        db = SyncSessionLocal()
+        rows = db.execute(
+            text(
+                "SELECT content, evaluated_at FROM reflections "
+                "WHERE user_id = :uid ORDER BY evaluated_at DESC LIMIT :limit"
+            ),
+            {"uid": user_id, "limit": limit}
+        ).fetchall()
+        
+        history = []
+        for row in rows:
+            reflection = _parse_json_field(row[0]) or {}
+            if row[1] and not reflection.get("evaluated_at"):
+                reflection["evaluated_at"] = row[1].isoformat()
+            history.append(reflection)
+            
+        return {"history": history}
+    except Exception as e:
+        print(f"[Agent] Failed to load history for user {user_id}: {e}")
+        return {"history": []}
+    finally:
+        if db:
+            db.close()
+
+
 # --- Chatbot Assistance ---
 @app.post("/api/chat")
-async def chat_endpoint(request: ChatMessageRequest):
+async def chat_endpoint(
+    request: ChatMessageRequest,
+    current_user: Dict = Depends(get_current_user),
+):
     """Handle newbie chat requests from frontend."""
     try:
         if not request.message.strip():
@@ -1441,7 +1621,8 @@ async def chat_endpoint(request: ChatMessageRequest):
         reply = await asyncio.to_thread(
             agent.llm.chat_assistant, 
             request.message, 
-            request.history
+            request.history,
+            request.app_context,
         )
         return {"reply": reply}
     except Exception as e:

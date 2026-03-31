@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     app_name: str = "Riskism"
     app_env: str = "development"
     app_secret_key: str = "change-me-in-production"
+    secret_key: str = ""
     debug: bool = True
 
     # PostgreSQL
@@ -58,6 +59,10 @@ class Settings(BaseSettings):
     @property
     def redis_url(self) -> str:
         return f"redis://{self.redis_host}:{self.redis_port}"
+
+    @property
+    def jwt_secret_key(self) -> str:
+        return self.secret_key or self.app_secret_key
 
     class Config:
         env_file = ".env"

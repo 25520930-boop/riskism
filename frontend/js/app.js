@@ -7,8 +7,9 @@ class RiskismApp {
         this.currentTab = 'dashboard';
         this.agentResult = null;
         this.portfolioData = null; // Cached portfolio risk data
+        this.marketSnapshot = null;
         this.tickerInterval = null;
-        this.userId = this.normalizeUserId(localStorage.getItem('riskism_user_id'));
+        this.userId = null;
         this.username = localStorage.getItem('riskism_username') || null;
         this.API_TIMEOUT = 15000;
         this.firebaseEnabled = false;
@@ -28,7 +29,7 @@ class RiskismApp {
     }
 
     isAuthenticated() {
-        return Number.isFinite(Number(this.userId)) && Number(this.userId) > 0;
+        return api.hasAccessToken();
     }
 
     runSafely(label, fn) {
@@ -164,6 +165,12 @@ class RiskismApp {
             this.showLoginModal();
             return;
         }
+
+        const restored = await this.restoreSession();
+        if (!restored) {
+            this.showLoginModal();
+            return;
+        }
         
         this.hideLoginModal();
         this.finishInit();
@@ -250,14 +257,35 @@ class RiskismApp {
         }
     }
 
-    completeLoginSession(res) {
-        if (!res || !res.user_id) return false;
+    async restoreSession() {
+        const profile = await api.getCurrentUser();
+        if (!profile?.user_id) {
+            api.clearAccessToken();
+            localStorage.removeItem('riskism_username');
+            localStorage.removeItem('riskism_auth_provider');
+            localStorage.removeItem('riskism_user_id');
+            this.userId = null;
+            this.username = null;
+            return false;
+        }
 
-        this.userId = this.normalizeUserId(res.user_id);
-        this.username = res.display_name || res.username;
-        localStorage.setItem('riskism_user_id', String(this.userId));
+        this.userId = this.normalizeUserId(profile.user_id);
+        this.username = profile.display_name || profile.username || 'User';
         localStorage.setItem('riskism_username', this.username);
-        localStorage.setItem('riskism_auth_provider', res.auth_provider || 'local');
+        localStorage.setItem('riskism_auth_provider', profile.auth_provider || 'local');
+        return true;
+    }
+
+    async completeLoginSession(authPayload) {
+        if (!authPayload?.access_token) return false;
+
+        api.setAccessToken(authPayload.access_token);
+        const restored = await this.restoreSession();
+        if (!restored) {
+            api.clearAccessToken();
+            return false;
+        }
+
         this.hideLoginModal();
         this.finishInit();
         return true;
@@ -397,7 +425,7 @@ class RiskismApp {
                     UI.toast(result?.error || 'Authentication failed.', 'error');
                     return;
                 }
-                if (!this.completeLoginSession(result.data)) {
+                if (!(await this.completeLoginSession(result.data))) {
                     UI.toast('Authentication failed. Please try again.', 'error');
                     return;
                 }
@@ -444,7 +472,7 @@ class RiskismApp {
                     );
                     if (!result?.ok) {
                         UI.toast(result?.error || 'Google sign-in failed.', 'error');
-                    } else if (!this.completeLoginSession(result.data)) {
+                    } else if (!(await this.completeLoginSession(result.data))) {
                         UI.toast('Firebase login error, please try again.', 'error');
                     }
                 } catch (e) {
@@ -515,6 +543,7 @@ class RiskismApp {
         if (!btn) return;
         btn.addEventListener('click', async () => {
             await window.FirebaseAuthBridge?.signOut?.();
+            api.clearAccessToken();
             localStorage.removeItem('riskism_user_id');
             localStorage.removeItem('riskism_username');
             localStorage.removeItem('riskism_auth_provider');
@@ -535,7 +564,7 @@ class RiskismApp {
         UI.showLoading(`🤖 Riskism AI is running ${type} analysis...`);
         try {
             const result = await this._fetchWithTimeout(
-                api.triggerAgent(this.userId, type),
+                api.triggerAgent(type),
                 120000
             );
             this.agentResult = result;
@@ -558,12 +587,14 @@ class RiskismApp {
 
     applyAgentResult(r) {
         const insight = r.insight || r.afternoon_insight;
+        const stockRisks = r.risk_metrics || r.stock_risks || {};
+        const portfolioRisk = r.portfolio_risk || this.portfolioData?.portfolio_risk || {};
 
         // Dashboard: Update core metrics + sparklines
         if (r.portfolio_risk) {
             UI.updateMetrics(r.portfolio_risk, r.metrics_history);
         }
-        if (insight) UI.renderAI(insight);
+        if (insight) UI.renderAI(insight, stockRisks, portfolioRisk);
         if (r.anomalies && r.anomalies.length) {
             UI.toast(`⚡ ${r.anomalies.length} anomalies detected`, 'info');
             UI.pushNotifications(r.anomalies);
@@ -571,7 +602,6 @@ class RiskismApp {
 
         // Update holdings with agent's data
         const portfolio = r.portfolio || (this.portfolioData ? this.portfolioData.portfolio : api.getDemoPortfolio());
-        const stockRisks = r.risk_metrics || r.stock_risks || {};
         UI.updateHoldings(portfolio.holdings, stockRisks);
         window._cachedPortfolioSymbols = (portfolio.holdings || []).map(h => h.symbol);
 
@@ -840,7 +870,7 @@ class RiskismApp {
             btnSave.textContent = 'Saving...';
             btnSave.disabled = true;
             try {
-                const res = await api.updatePortfolio(this.userId, cap, holdings);
+                const res = await api.updatePortfolio(cap, holdings);
                 if (!res || res.status !== 'success') {
                     UI.toast(res?.detail || 'Failed to save portfolio', 'error');
                     return;
@@ -857,7 +887,7 @@ class RiskismApp {
                 modal.classList.remove('active');
 
                 const port = await this._fetchWithTimeout(
-                    api.getPortfolioRisk(this.userId),
+                    api.getPortfolioRisk(),
                     this.API_TIMEOUT
                 );
                 if (port) {
@@ -939,14 +969,71 @@ class RiskismApp {
         this.refreshNewsForCurrentPortfolio();
     }
 
+    getChatContext() {
+        const holdings = this.portfolioData?.portfolio?.holdings || [];
+        const totalValue = this.portfolioData?.portfolio?.total_market_value || this.portfolioData?.portfolio_metrics?.total_value || 0;
+        const stockRisks = this.portfolioData?.stock_risks || {};
+        const topRiskSymbols = Object.entries(stockRisks)
+            .sort((a, b) => (b[1]?.risk_score || 0) - (a[1]?.risk_score || 0))
+            .slice(0, 3)
+            .map(([symbol, metric]) => ({
+                symbol,
+                risk_score: metric?.risk_score || 0,
+                var_95: metric?.var_95 || 0,
+            }));
+
+        return {
+            current_tab: this.currentTab,
+            market: this.marketSnapshot
+                ? {
+                    symbol: 'VNINDEX',
+                    price: this.marketSnapshot.price ?? null,
+                    change_pct: this.marketSnapshot.change_pct ?? null,
+                    timestamp: this.marketSnapshot.timestamp ?? null,
+                }
+                : null,
+            portfolio: holdings.length
+                ? {
+                    total_value: totalValue,
+                    total_pnl: this.portfolioData?.portfolio?.total_pnl ?? null,
+                    total_pnl_pct: this.portfolioData?.portfolio?.total_pnl_pct ?? null,
+                    holdings: holdings.slice(0, 5).map(h => ({
+                        symbol: h.symbol,
+                        sector: h.sector,
+                        weight_pct: totalValue > 0 ? ((h.market_value || 0) / totalValue * 100) : 0,
+                        pnl_pct: h.pnl_pct ?? null,
+                    })),
+                    top_risk_symbols: topRiskSymbols,
+                }
+                : null,
+            portfolio_risk: this.portfolioData?.portfolio_risk
+                ? {
+                    var_95: this.portfolioData.portfolio_risk.var_95 ?? null,
+                    cvar_95: this.portfolioData.portfolio_risk.cvar_95 ?? null,
+                    adjusted_var_95: this.portfolioData.portfolio_risk.adjusted_var_95 ?? null,
+                    max_drawdown: this.portfolioData.portfolio_risk.max_drawdown ?? null,
+                    beta_dimson: this.portfolioData.portfolio_risk.beta_dimson ?? this.portfolioData.portfolio_risk.beta ?? null,
+                    liquidity_profile: this.portfolioData.portfolio_risk.liquidity_profile || null,
+                    tail_risk_contributors: (this.portfolioData.portfolio_risk.tail_risk_contributors || []).slice(0, 3),
+                    stress_scenarios_detail: (this.portfolioData.portfolio_risk.stress_scenarios_detail || []).slice(0, 3),
+                }
+                : null,
+            latest_insight_summary:
+                this.agentResult?.insight?.summary ||
+                this.agentResult?.afternoon_insight?.summary ||
+                null,
+        };
+    }
+
     async loadLatestAgentArtifacts() {
         if (!this.isAuthenticated()) return;
 
         try {
-            const [insightPayload, predictionPayload, statusPayload] = await Promise.all([
-                this._fetchWithTimeout(api.getInsights(this.userId), this.API_TIMEOUT),
-                this._fetchWithTimeout(api.getPredictions(this.userId), this.API_TIMEOUT),
-                this._fetchWithTimeout(api.getAgentStatus(this.userId), this.API_TIMEOUT),
+            const [insightPayload, predictionPayload, historyPayload, statusPayload] = await Promise.all([
+                this._fetchWithTimeout(api.getInsights(), this.API_TIMEOUT),
+                this._fetchWithTimeout(api.getPredictions(), this.API_TIMEOUT),
+                this._fetchWithTimeout(api.getPredictionsHistory(), this.API_TIMEOUT),
+                this._fetchWithTimeout(api.getAgentStatus(), this.API_TIMEOUT),
             ]);
 
             const latestInsight =
@@ -958,12 +1045,29 @@ class RiskismApp {
                 predictionPayload?.reflection;
 
             if (latestInsight) {
-                UI.renderAI(latestInsight);
+                UI.renderAI(
+                    latestInsight,
+                    this.portfolioData?.stock_risks || {},
+                    this.portfolioData?.portfolio_risk || {},
+                );
                 UI.renderReport(latestInsight);
             }
 
             if (latestReflection) {
                 UI.renderReflection(latestReflection);
+            }
+
+            if (historyPayload && historyPayload.history && historyPayload.history.length > 0) {
+                UI._predictionHistory = [];
+                UI._predictionHistoryKeys.clear();
+                const oldestFirst = [...historyPayload.history].reverse();
+                for (const h of oldestFirst) {
+                    UI.renderPredictionTimeline(h);
+                }
+                if (latestReflection && !historyPayload.history.find(r => r.evaluated_at === latestReflection.evaluated_at)) {
+                    UI.renderPredictionTimeline(latestReflection);
+                }
+            } else if (latestReflection) {
                 UI.renderPredictionTimeline(latestReflection);
             }
 
@@ -998,7 +1102,7 @@ class RiskismApp {
         // Load portfolio risk (contains ALL real data)
         try {
             const port = await this._fetchWithTimeout(
-                api.getPortfolioRisk(this.userId),
+                api.getPortfolioRisk(),
                 this.API_TIMEOUT
             );
             if (port) {
@@ -1023,6 +1127,7 @@ class RiskismApp {
             );
 
             if (snapshot && Number.isFinite(Number(snapshot.change_pct))) {
+                this.marketSnapshot = snapshot;
                 UI.updateTicker({
                     VNINDEX: {
                         display_name: 'VN-INDEX',
@@ -1035,6 +1140,7 @@ class RiskismApp {
             console.warn('[Dashboard] VN-Index load failed:', e.message);
         }
 
+        this.marketSnapshot = null;
         UI.updateTicker({
             VNINDEX: {
                 display_name: 'VN-INDEX',

@@ -20,6 +20,24 @@ class RiskismAPI {
         this.onConnectionChange = null;
         this.demoMode = true; // Fallback to demo when backend is unavailable
         this.REQUEST_TIMEOUT = 8000;
+        this.accessToken = window.localStorage.getItem('riskism_access_token') || '';
+    }
+
+    hasAccessToken() {
+        return Boolean(this.accessToken);
+    }
+
+    setAccessToken(token) {
+        this.accessToken = token || '';
+        if (this.accessToken) {
+            window.localStorage.setItem('riskism_access_token', this.accessToken);
+        } else {
+            window.localStorage.removeItem('riskism_access_token');
+        }
+    }
+
+    clearAccessToken() {
+        this.setAccessToken('');
     }
 
     // ─── HTTP Methods ────────────────────────────────────
@@ -27,10 +45,16 @@ class RiskismAPI {
     async fetchWithTimeout(url, options = {}, timeoutMs = this.REQUEST_TIMEOUT) {
         const controller = new AbortController();
         const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+        const headers = new Headers(options.headers || {});
+
+        if (this.accessToken && !headers.has('Authorization')) {
+            headers.set('Authorization', `Bearer ${this.accessToken}`);
+        }
 
         try {
             return await fetch(url, {
                 ...options,
+                headers,
                 signal: controller.signal,
             });
         } finally {
@@ -41,6 +65,7 @@ class RiskismAPI {
     async get(endpoint) {
         try {
             const res = await this.fetchWithTimeout(`${API_BASE}${endpoint}`);
+            if (res.status === 401) this.clearAccessToken();
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return await res.json();
         } catch (err) {
@@ -56,6 +81,7 @@ class RiskismAPI {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data),
             });
+            if (res.status === 401) this.clearAccessToken();
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return await res.json();
         } catch (err) {
@@ -97,6 +123,10 @@ class RiskismAPI {
 
     async signup(username, password) {
         return await this.postAuth('/api/auth/signup', { username, password });
+    }
+
+    async getCurrentUser() {
+        return await this.get('/api/auth/me');
     }
 
     async getFirebaseConfig() {
@@ -194,25 +224,23 @@ class RiskismAPI {
 
     // ─── Portfolio ───────────────────────────────────────
 
-    async getPortfolio(userId) {
-        if (userId == null || userId === '' || userId === 'null' || userId === 'undefined') {
-            return null;
-        }
-        const data = await this.get(`/api/portfolio/${userId}`);
-        return data || this.getDemoPortfolio();
+    async getPortfolio() {
+        if (!this.hasAccessToken()) return null;
+        const data = await this.get('/api/portfolio');
+        if (data) return data;
+        return this.hasAccessToken() ? this.getDemoPortfolio() : null;
     }
 
-    async getPortfolioRisk(userId) {
-        if (userId == null || userId === '' || userId === 'null' || userId === 'undefined') {
-            return null;
-        }
-        const data = await this.get(`/api/portfolio/${userId}/risk`);
-        return data || this.getDemoPortfolioRisk();
+    async getPortfolioRisk() {
+        if (!this.hasAccessToken()) return null;
+        const data = await this.get('/api/portfolio/risk');
+        if (data) return data;
+        return this.hasAccessToken() ? this.getDemoPortfolioRisk() : null;
     }
 
-    async updatePortfolio(userId, capital, holdings) {
+    async updatePortfolio(capital, holdings) {
         try {
-            const res = await this.fetchWithTimeout(`${API_BASE}/api/portfolio/${userId}/update`, {
+            const res = await this.fetchWithTimeout(`${API_BASE}/api/portfolio/update`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -221,6 +249,7 @@ class RiskismAPI {
                 }),
             });
             const data = await res.json().catch(() => null);
+            if (res.status === 401) this.clearAccessToken();
             if (!res.ok) {
                 return {
                     status: 'error',
@@ -229,15 +258,15 @@ class RiskismAPI {
             }
             return data;
         } catch (err) {
-            console.warn(`[API] POST /api/portfolio/${userId}/update failed:`, err.message);
+            console.warn('[API] POST /api/portfolio/update failed:', err.message);
             return null;
         }
     }
 
     // ─── Insights & News ─────────────────────────────────
 
-    async getInsights(userId = 1) {
-        return await this.get(`/api/insights/${userId}`);
+    async getInsights() {
+        return await this.get('/api/insights');
     }
 
     async getNews(limit = 8) {
@@ -247,13 +276,17 @@ class RiskismAPI {
 
     // ─── Agent ───────────────────────────────────────────
 
-    async triggerAgent(userId, type = 'morning', symbol = null) {
+    async triggerAgent(type = 'morning', symbol = null) {
         try {
             const res = await this.fetchWithTimeout(`${API_BASE}/api/agent/trigger`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId, analysis_type: type, symbol }),
+                body: JSON.stringify({ analysis_type: type, symbol }),
             }, 120000);
+            if (res.status === 401) {
+                this.clearAccessToken();
+                throw new Error('401: Unauthorized');
+            }
             if (res.status === 429) {
                 const err = await res.json();
                 throw new Error(`429: ${err.detail || 'Rate limit exceeded'}`);
@@ -261,24 +294,29 @@ class RiskismAPI {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return await res.json();
         } catch (err) {
-            if (err.message.startsWith('429')) throw err; // propagate rate limit
+            if (err.message.startsWith('429') || err.message.startsWith('401')) throw err;
             console.warn('[API] Agent trigger failed:', err.message);
             return this.getDemoAgentResult();
         }
     }
 
-    async getAgentStatus(userId = 1) {
-        return await this.get(`/api/agent/status?user_id=${userId}`);
+    async getAgentStatus() {
+        return await this.get('/api/agent/status');
     }
 
-    async getPredictions(userId = 1) {
-        return await this.get(`/api/predictions/${userId}`);
+    async getPredictions() {
+        return await this.get('/api/predictions');
     }
 
-    async chatAssistant(message, history = []) {
+    async getPredictionsHistory(limit = 10) {
+        return await this.get(`/api/predictions/history?limit=${limit}`);
+    }
+
+    async chatAssistant(message, history = [], appContext = {}) {
         return await this.post('/api/chat', {
             message: message,
-            history: history
+            history: history,
+            app_context: appContext,
         });
     }
 
@@ -439,8 +477,8 @@ class RiskismAPI {
                 hhi: 0.38,
                 effective_n: 2.63,
                 sector_exposure: { Banking: 0.45, Technology: 0.32, Industrial: 0.23 },
-                benchmark_sector_exposure: { Banking: 0.27, Technology: 0.1, Industrial: 0.17, RealEstate: 0.13, Consumer: 0.17, Energy: 0.07, Chemicals: 0.1 },
-                sector_gap_vs_vn30: { Banking: 0.18, Technology: 0.22, Industrial: 0.06, Consumer: -0.17, RealEstate: -0.13, Energy: -0.07, Chemicals: -0.1 },
+                benchmark_sector_exposure: { Banking: 0.27, Technology: 0.1, Industrial: 0.17, 'Real Estate': 0.13, Consumer: 0.17, Energy: 0.07, Chemicals: 0.1 },
+                sector_gap_vs_vn30: { Banking: 0.18, Technology: 0.22, Industrial: 0.06, Consumer: -0.17, 'Real Estate': -0.13, Energy: -0.07, Chemicals: -0.1 },
                 max_sector_weight: 0.45,
                 total_value: 19700000,
                 diversification_score: 45,

@@ -4,6 +4,7 @@ Routes AI tasks to Google Gemini with appropriate prompts.
 """
 import json
 import hashlib
+import re
 from typing import Dict, List, Optional
 from backend.config import get_settings
 from backend.utils.perf import TTLCache
@@ -29,9 +30,9 @@ class LLMRouter:
         
         # Multi-LLM Routing Map (Match Proposal)
         self.models = {
-            "fast": "gemini-2.0-flash",           # For news sentiment, entity extraction
-            "reasoning": "gemini-2.0-flash",    # For complex insight generation
-            "fallback": "gemini-2.0-flash"
+            "fast": "gemini-1.5-flash",           # More stable quota on free tier
+            "reasoning": "gemini-1.5-flash", 
+            "fallback": "gemini-1.5-flash"
         }
 
         # Response cache: avoid re-scoring identical articles (30min TTL)
@@ -201,6 +202,101 @@ class LLMRouter:
             normalized[field] = str(normalized.get(field) or fallback.get(field) or '')
 
         return normalized
+
+    def _is_benchmark_symbol(self, symbol: str) -> bool:
+        normalized = str(symbol or '').strip().upper()
+        return normalized in {
+            'VNINDEX', 'VN-INDEX', 'VN30', 'VN30INDEX',
+            'HNXINDEX', 'HNX30', 'UPCOM', 'UPCOMINDEX',
+        }
+
+    def _extract_stock_metric_map(self, risk_metrics: Dict) -> Dict[str, Dict]:
+        if not isinstance(risk_metrics, dict):
+            return {}
+
+        candidates = []
+        for key in ('stock_metrics', 'risk_metrics', 'latest_metrics'):
+            value = risk_metrics.get(key)
+            if isinstance(value, dict):
+                candidates.append(value)
+        candidates.append(risk_metrics)
+
+        for candidate in candidates:
+            extracted = {}
+            for symbol, metrics in candidate.items():
+                normalized_symbol = str(symbol or '').strip().upper()
+                if self._is_benchmark_symbol(normalized_symbol):
+                    continue
+                if not isinstance(metrics, dict):
+                    continue
+                if not any(
+                    field in metrics
+                    for field in ('risk_score', 'beta', 'var_95', 'sharpe_ratio', 'volatility', 'max_drawdown')
+                ):
+                    continue
+                extracted[normalized_symbol] = metrics
+            if extracted:
+                return extracted
+
+        return {}
+
+    def _build_insight_fallback(self, risk_metrics: Dict) -> Dict:
+        stock_metric_map = self._extract_stock_metric_map(risk_metrics)
+        if not stock_metric_map:
+            return {
+                'title': 'Báo cáo rủi ro hàng ngày',
+                'risk_level': 'medium',
+                'summary': 'Hệ thống đang thu thập và phân tích dữ liệu danh mục.',
+                'key_findings': ['Đang cập nhật dữ liệu danh mục mới nhất...'],
+                'risk_factors': [],
+                'action_items': ['Theo dõi thêm'],
+                'confidence_score': 0.5,
+                'trends': [],
+            }
+
+        ranked = sorted(
+            stock_metric_map.items(),
+            key=lambda item: float(item[1].get('risk_score') or 50),
+            reverse=True,
+        )
+        top_symbols = [symbol for symbol, _ in ranked[:3]]
+        avg_risk = sum(float(metrics.get('risk_score') or 50) for _, metrics in ranked) / len(ranked)
+        risk_level = 'high' if avg_risk >= 70 else 'medium' if avg_risk >= 45 else 'low'
+
+        def trend_row(symbol: str, metrics: Dict) -> Dict:
+            score = int(round(float(metrics.get('risk_score') or 50)))
+            trend = 'down' if score >= 65 else 'neutral' if score >= 40 else 'up'
+            return {'ticker': symbol, 'trend': trend, 'conf': score}
+
+        key_findings = []
+        top_symbol, top_metrics = ranked[0]
+        key_findings.append(
+            f"{top_symbol} đang có risk score khoảng {int(round(float(top_metrics.get('risk_score') or 50)))}/100 và là điểm cần theo dõi sát nhất."
+        )
+        if len(ranked) > 1:
+            second_symbol, second_metrics = ranked[1]
+            key_findings.append(
+                f"{second_symbol} là lớp rủi ro tiếp theo với beta khoảng {float(second_metrics.get('beta') or 0):.2f}."
+            )
+        if len(ranked) > 2:
+            safer_symbol, safer_metrics = ranked[-1]
+            key_findings.append(
+                f"{safer_symbol} đang là mã phòng thủ hơn trong danh mục với score khoảng {int(round(float(safer_metrics.get('risk_score') or 50)))}/100."
+            )
+
+        return {
+            'title': 'Báo cáo rủi ro hàng ngày',
+            'risk_level': risk_level,
+            'summary': (
+                f"Rủi ro danh mục hiện tập trung chủ yếu ở {', '.join(top_symbols[:2])}. "
+                "Hệ thống đang dùng dữ liệu định lượng mới nhất để giữ AI insight bám đúng danh mục."
+            ),
+            'key_findings': key_findings[:3],
+            'risk_factors': [f'Tập trung rủi ro ở {top_symbols[0]}'],
+            'action_items': [f'Theo dõi thêm {top_symbols[0]} và cân đối tỷ trọng nếu biến động tăng mạnh'],
+            'confidence_score': 0.62,
+            'trends': [trend_row(symbol, metrics) for symbol, metrics in ranked[:3]],
+        }
 
     def _heuristic_sentiment(self, title: str, summary: str) -> Dict:
         text = f"{title} {summary}".lower()
@@ -427,16 +523,7 @@ TRẢ VỀ ĐỊNH DẠNG JSON:
     ]
 }}"""
 
-        fallback = {
-            'title': 'Báo cáo rủi ro hàng ngày',
-            'risk_level': 'medium',
-            'summary': 'Hệ thống đang thu thập và phân tích dữ liệu.',
-            'key_findings': ['Đang cập nhật dữ liệu...'],
-            'risk_factors': [],
-            'action_items': ['Theo dõi thêm'],
-            'confidence_score': 0.5,
-            'trends': [{'ticker': 'VNINDEX', 'trend': 'neutral', 'conf': 50}]
-        }
+        fallback = self._build_insight_fallback(risk_metrics)
 
         result = self._call_gemini_json(
             prompt, system, temperature=0.4,
@@ -509,11 +596,11 @@ Phân tích (JSON):
 }}"""
 
         fallback = {
-            'accuracy_score': 0.5,
-            'what_was_right': 'Đang phân tích',
-            'what_was_wrong': 'Đang phân tích',
-            'lesson_learned': 'Cần thêm dữ liệu',
-            'improvement_suggestion': 'Thu thập thêm dữ liệu',
+            'accuracy_score': 0.0,
+            'what_was_right': '⚠️ Quota Cloud Exceeded (RESOURCE_EXHAUSTED)',
+            'what_was_wrong': 'Không thể gọi Gemini AI: Limit hiện tại là 0.',
+            'lesson_learned': 'Vui lòng kiểm tra lại Google AI Studio hoặc thay API Key mới có đủ quota.',
+            'improvement_suggestion': 'Dashboard đang tự động chuyển sang chế độ dự phòng (Mode Offline).',
         }
 
         result = self._call_gemini_json(
@@ -525,8 +612,140 @@ Phân tích (JSON):
             return dict(fallback)
         return self._normalize_reflection_payload(result, fallback)
 
-    def _heuristic_chat_reply(self, message: str) -> str:
+    def _chat_reply_from_context(self, message: str, app_context: Optional[Dict] = None) -> Optional[str]:
+        """Deterministic replies for app-specific questions using live frontend context."""
+        if not isinstance(app_context, dict) or not app_context:
+            return None
+
         text = (message or '').lower()
+        market = app_context.get('market') or {}
+        portfolio = app_context.get('portfolio') or {}
+        portfolio_risk = app_context.get('portfolio_risk') or {}
+        holdings = portfolio.get('holdings') or []
+        top_risk_symbols = portfolio.get('top_risk_symbols') or []
+        tail_risk = portfolio_risk.get('tail_risk_contributors') or []
+        liquidity_profile = portfolio_risk.get('liquidity_profile') or {}
+        stress_details = portfolio_risk.get('stress_scenarios_detail') or []
+
+        if any(keyword in text for keyword in ('vnindex', 'vn-index', 'thị trường hôm nay', 'thi truong hom nay', 'market hôm nay', 'market hom nay')):
+            change_pct = market.get('change_pct')
+            price = market.get('price')
+            if change_pct is not None and price is not None:
+                sign = '+' if float(change_pct) >= 0 else ''
+                return (
+                    f"VN-Index hiện quanh {float(price):,.2f} điểm, biến động {sign}{float(change_pct):.2f}%."
+                    " Nếu muốn, mình có thể nối luôn sang ý nghĩa của nhịp này với danh mục hiện tại."
+                )
+
+        if any(keyword in text for keyword in ('danh mục', 'danh muc', 'portfolio', 'holding', 'đang giữ', 'dang giu', 'giữ mã nào', 'giu ma nao')):
+            if holdings:
+                holdings_text = ', '.join(
+                    f"{item.get('symbol')} ({float(item.get('weight_pct', 0)):.0f}%, P&L {float(item.get('pnl_pct', 0)):+.1f}%)"
+                    for item in holdings[:5]
+                )
+                total_pnl_pct = portfolio.get('total_pnl_pct')
+                if total_pnl_pct is not None:
+                    return f"Danh mục hiện có: {holdings_text}. Tổng P&L đang {float(total_pnl_pct):+.1f}%."
+                return f"Danh mục hiện có: {holdings_text}."
+
+        if any(keyword in text for keyword in ('mã nào rủi ro nhất', 'ma nao rui ro nhat', 'tail risk', 'nguy hiểm nhất', 'nguy hiem nhat')):
+            if tail_risk:
+                top = tail_risk[0]
+                return (
+                    f"Mã đang kéo tail risk mạnh nhất là {top.get('symbol')} với khoảng "
+                    f"{float(top.get('contribution_pct', 0)) * 100:.0f}% đóng góp tail load."
+                    f" Driver chính hiện là {top.get('driver', 'tail')}."
+                )
+            if top_risk_symbols:
+                top = top_risk_symbols[0]
+                return f"Theo risk score hiện tại, {top.get('symbol')} đang cao nhất với điểm rủi ro khoảng {int(top.get('risk_score', 0))}/100."
+
+        if any(keyword in text for keyword in ('var', 'cvar', 'drawdown', 'beta', 't+2', 'thanh khoản', 'thanh khoan', 'liquidity')):
+            parts = []
+            if 'var' in text or 'cvar' in text:
+                if portfolio_risk.get('var_95') is not None:
+                    parts.append(
+                        f"VaR 95% hiện khoảng {abs(float(portfolio_risk.get('var_95', 0))) * 100:.1f}%"
+                    )
+                if portfolio_risk.get('adjusted_var_95') is not None and any(k in text for k in ('t+2', 'thanh khoản', 'thanh khoan', 'liquidity', 'adjusted')):
+                    parts.append(
+                        f"Adj VaR T+2 khoảng {abs(float(portfolio_risk.get('adjusted_var_95', 0))) * 100:.1f}%"
+                    )
+                if portfolio_risk.get('cvar_95') is not None:
+                    parts.append(
+                        f"CVaR 95% khoảng {abs(float(portfolio_risk.get('cvar_95', 0))) * 100:.1f}%"
+                    )
+            if 'drawdown' in text and portfolio_risk.get('max_drawdown') is not None:
+                parts.append(f"max drawdown khoảng {abs(float(portfolio_risk.get('max_drawdown', 0))) * 100:.1f}%")
+            if 'beta' in text and portfolio_risk.get('beta_dimson') is not None:
+                parts.append(f"beta Dimson khoảng {float(portfolio_risk.get('beta_dimson', 0)):.2f}")
+            if any(k in text for k in ('t+2', 'thanh khoản', 'thanh khoan', 'liquidity')) and liquidity_profile:
+                parts.append(
+                    f"horizon thanh khoản hiệu dụng ~{float(liquidity_profile.get('effective_horizon_days', 3)):.1f} ngày"
+                )
+            if parts:
+                return ' | '.join(parts) + '.'
+
+        if any(keyword in text for keyword in ('stress', 'kịch bản xấu', 'kich ban xau', 'xấu nhất', 'xau nhat')):
+            if stress_details:
+                worst = stress_details[0]
+                start_date = worst.get('start_date')
+                end_date = worst.get('end_date')
+                window = f" từ {start_date} đến {end_date}" if start_date and end_date else ""
+                return (
+                    f"Stress window xấu nhất hiện là {worst.get('label')} với mức lỗ khoảng "
+                    f"{abs(float(worst.get('return', 0))) * 100:.1f}%{window}."
+                )
+
+        if any(keyword in text for keyword in ('insight', 'tóm tắt', 'tom tat', 'ai nói gì', 'ai noi gi')):
+            summary = app_context.get('latest_insight_summary')
+            if summary:
+                return f"Tóm tắt AI gần nhất: {summary}"
+
+        return None
+
+    def _has_keyword(self, text: str, tokens: tuple) -> bool:
+        """Helper to do word-boundary matching instead of raw substring."""
+        for token in tokens:
+            if re.search(rf'\b{re.escape(token)}\b', text):
+                return True
+        return False
+
+    def _heuristic_chat_reply(self, message: str, app_context: Optional[Dict] = None) -> str:
+        contextual_reply = self._chat_reply_from_context(message, app_context)
+        if contextual_reply:
+            return contextual_reply
+
+        text = (message or '').lower().strip()
+
+        if (
+            re.search(r'\b(app|riskism)\b.*\b(giúp|giup|được|duoc|dcg|làm|lam|hỗ trợ|ho tro)\b', text)
+            or re.search(r'\b(giúp|giup|được|duoc|dcg|làm|lam|hỗ trợ|ho tro)\b.*\b(app|riskism)\b', text)
+        ):
+            return (
+                "Riskism hiện giúp bạn 4 việc chính: "
+                "1) xem nhanh sức khỏe danh mục như VaR, CVaR, beta, drawdown; "
+                "2) chỉ ra mã đang kéo tail risk, bottleneck thanh khoản T+2 và stress window xấu nhất; "
+                "3) tóm tắt market context như VN-Index và news liên quan; "
+                "4) trả lời các câu hỏi general ngắn gọn. "
+                "Nếu muốn, mình có thể giải thích ngay trên danh mục bạn đang mở."
+            )
+
+        if self._has_keyword(text, ('xin chào', 'xin chao', 'chào', 'hello', 'hi')):
+            return "Chào bạn! Mình có thể trả lời cả câu hỏi về Riskism/danh mục hiện tại lẫn các câu hỏi general ngắn gọn. Bạn hỏi thẳng ý chính là được."
+
+        if self._has_keyword(text, ('cảm ơn', 'cam on', 'thanks', 'thank you')):
+            return "Không có gì. Nếu muốn, mình có thể giải thích tiếp theo kiểu rất ngắn gọn hoặc đi sâu từng bước."
+
+        if self._has_keyword(text, ('bạn làm được gì', 'ban lam duoc gi', 'giúp gì', 'giup gi', 'help', 'hỗ trợ gì', 'ho tro gi')):
+            return "Mình hỗ trợ 2 kiểu: 1) câu hỏi trong Riskism như danh mục, VaR, tail risk, VN-Index, reflection loop; 2) câu hỏi ngoài luồng như học tập, công việc ở mức ngắn gọn, thực dụng."
+
+        if self._has_keyword(text, ('requirement', 'requirements', 'yêu cầu', 'yeu cau', 'user story', 'acceptance criteria', 'spec', 'scope', 'prd')):
+            return (
+                "Mình có thể giúp bóc requirement nữa. Bạn chỉ cần nói mục tiêu, user nào dùng, đầu ra mong muốn và ràng buộc nếu có; "
+                "mình sẽ tách lại thành problem, feature scope, user flow, acceptance criteria và edge cases."
+            )
+
         glossary = [
             (('var', 'value at risk'), 'VaR là mức lỗ ước tính trong điều kiện bình thường ở một ngưỡng xác suất, ví dụ 95%. VaR càng lớn thì rủi ro ngắn hạn càng cao.'),
             (('cvar', 'expected shortfall'), 'CVaR là mức lỗ trung bình trong nhóm tình huống xấu nhất sau khi đã vượt VaR. Nó phản ánh tail risk rõ hơn VaR.'),
@@ -540,51 +759,130 @@ Phân tích (JSON):
         ]
 
         for keywords, answer in glossary:
-            if any(keyword in text for keyword in keywords):
+            if self._has_keyword(text, keywords):
                 return answer
 
-        finance_hints = (
-            'risk', 'rủi ro', 'portfolio', 'danh mục', 'sentiment',
-            'chứng khoán', 'cổ phiếu', 'riskism', 'beta', 'var', 'sharpe'
-        )
-        if any(hint in text for hint in finance_hints):
-            return 'Riskism đang tập trung giải thích các chỉ số như VaR, CVaR, Beta, Sharpe, Drawdown, HHI hoặc logic AI Reflection. Bạn hỏi đúng tên chỉ số là mình giải thích nhanh cho bạn.'
+        if self._has_keyword(text, ('học', 'hoc', 'study', 'ôn thi', 'on thi', 'tập trung', 'tap trung', 'học tập', 'hoc tap')):
+            return (
+                "Nếu bạn muốn học hiệu quả hơn, thử 3 bước ngắn này: "
+                "1) chia mục tiêu thành block 25-45 phút, "
+                "2) mỗi block chỉ làm 1 việc, "
+                "3) cuối buổi tự tóm tắt lại 3 ý chính bằng lời của bạn. "
+                "Nếu muốn, mình có thể giúp bạn lên luôn một plan học theo môn hoặc theo deadline."
+            )
 
-        return 'Mình hiện chỉ hỗ trợ giải thích thuật ngữ về Riskism, quản trị rủi ro và chứng khoán. Bạn thử hỏi như: VaR là gì, Beta là gì, hoặc Reflection Loop hoạt động ra sao.'
+        if self._has_keyword(text, ('công việc', 'cong viec', 'productivity', 'năng suất', 'nang suat', 'quản lý thời gian', 'quan ly thoi gian')):
+            return (
+                "Với công việc, cách gọn nhất là: chốt 1 việc quan trọng nhất trong ngày, "
+                "gom các việc nhỏ vào 1 khung xử lý riêng, và luôn để lại 15 phút cuối ngày để review + lên việc ngày mai. "
+                "Nếu bạn muốn, mình có thể giúp bạn biến list việc hiện tại thành plan ưu tiên."
+            )
 
-    def chat_assistant(self, message: str, history: list) -> str:
-        """Handle chatbot assistance specifically for terms and explanations."""
+        if self._has_keyword(text, ('caption', 'cap', 'status', 'bio', 'tiểu sử', 'tieu su')):
+            topic = self._extract_general_topic(message, ('caption', 'status', 'bio', 'tiểu sử', 'tieu su'))
+            topic = topic or 'chủ đề này'
+            return (
+                f"Thử 3 phiên bản ngắn cho {topic} nhé:\n"
+                f"1. Nhẹ nhàng: \"Giữ lại một ngày thật đẹp cho {topic}.\"\n"
+                f"2. Tươi hơn: \"Một chút niềm vui, một chút kỷ niệm, và rất nhiều năng lượng cho {topic}.\"\n"
+                f"3. Ngắn gọn: \"{topic.capitalize()} mode: on.\""
+            )
+
+        if self._has_keyword(text, ('sinh nhật', 'sinh nhat', 'chúc mừng', 'chuc mung', 'lời chúc', 'loi chuc')):
+            return (
+                "Một lời chúc ngắn gọn bạn có thể dùng:\n"
+                "\"Chúc bạn tuổi mới thật nhiều sức khỏe, niềm vui và những điều tốt đẹp đến đúng lúc. "
+                "Mong năm nay sẽ là một năm thật đáng nhớ với bạn.\""
+            )
+
+        if self._has_keyword(text, ('câu đùa', 'cau dua', 'joke', 'đùa', 'dua')):
+            return "Một câu ngắn nhé: \"Deadline không đáng sợ, đáng sợ là mình tưởng còn nhiều thời gian.\""
+
+        if self._has_keyword(text, ('gợi ý', 'goi y', 'ý tưởng', 'y tuong', 'brainstorm', 'idea')):
+            topic = self._extract_general_topic(message, ('gợi ý', 'goi y', 'ý tưởng', 'y tuong', 'idea', 'brainstorm'))
+            topic = topic or 'việc này'
+            return (
+                f"Một vài ý tưởng nhanh cho {topic}:\n"
+                "1. Làm bản đơn giản nhất trước để chốt hướng.\n"
+                "2. Tạo 3 phiên bản khác tone để dễ chọn.\n"
+                "3. Ưu tiên thứ dễ làm ngay trong 30 phút đầu.\n"
+                "4. Nếu cần, mình có thể brainstorm sâu hơn theo mục tiêu cụ thể."
+            )
+
+        if self._has_keyword(text, ('viết mail', 'viet mail', 'email', 'tin nhắn', 'tin nhan', 'message', 'rewrite', 'viết lại', 'viet lai')):
+            return (
+                "Mình giúp viết ngắn được. Bạn chỉ cần nói rõ 3 thứ: viết cho ai, mục đích là gì, và tone muốn lịch sự hay thân mật. "
+                "Nếu muốn, mình có thể draft luôn một bản ngắn ngay ở tin nhắn tiếp theo."
+            )
+
+        if self._has_keyword(text, ('code', 'lập trình', 'lap trinh', 'debug', 'bug', 'api', 'sql', 'javascript', 'python')):
+            return "Mình hỗ trợ cả câu hỏi code ở mức ngắn gọn nữa. Nếu bạn dán lỗi, đoạn code, hoặc nói rõ muốn build gì, mình có thể cùng bóc nguyên nhân và đề xuất hướng làm."
+
+        return "Mình có thể trả lời cả câu hỏi trong Riskism lẫn câu hỏi ngoài luồng ở mức ngắn gọn. Nếu bạn hỏi về app, mình sẽ bám vào dữ liệu đang mở; nếu hỏi general, cứ hỏi thẳng nội dung."
+
+    def _extract_general_topic(self, message: str, markers: tuple) -> str:
+        raw = (message or '').strip()
+        normalized = raw
+        for marker in markers:
+            pattern = re.compile(re.escape(marker), re.IGNORECASE)
+            normalized = pattern.sub(' ', normalized)
+        normalized = re.sub(r'\b(cho mình|cho toi|giúp mình|giup minh|viết|viet|một|mot|ngắn gọn|ngan gon|với|ve|về|cho)\b', ' ', normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r'\s+', ' ', normalized).strip(' .?!:')
+        return normalized[:60]
+
+    def _format_chat_context(self, app_context: Optional[Dict]) -> str:
+        if not isinstance(app_context, dict) or not app_context:
+            return "{}"
+        try:
+            return json.dumps(app_context, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return "{}"
+
+    def chat_assistant(self, message: str, history: list, app_context: Optional[Dict] = None) -> str:
+        """Handle chat assistance for both Riskism context and broader user questions."""
+        contextual_reply = self._chat_reply_from_context(message, app_context)
         if not self.client:
-            return self._heuristic_chat_reply(message)
+            return contextual_reply or self._heuristic_chat_reply(message, app_context)
 
         system = (
-            "Bạn là 'Riskism Assistant', một trợ lý AI thân thiện chuyên giải thích các thuật ngữ "
-            "về tài chính, quản trị rủi ro chứng khoán và dự án Riskism (như VaR, CVaR, Sharpe Ratio, HHI, "
-            "Agentic Reflection, Capital Tier, Vol Regime) cho người dùng mới (newbie). "
+            "Bạn là 'Riskism Assistant', một trợ lý AI thân thiện trong ứng dụng Riskism. "
+            "Bạn có thể trả lời cả câu hỏi trong app lẫn câu hỏi ngoài luồng của người dùng. "
             "Nguyên tắc:\n"
-            "1. Luôn trả lời bằng tiếng Việt, thân thiện, dễ hiểu, dùng ngôn ngữ sinh động.\n"
-            "2. Trả lời NGẮN GỌN (dưới 150 chữ).\n"
-            "3. Nếu người dùng hỏi các chủ đề không liên quan đến tài chính, chứng khoán hoặc ứng dụng này (ví dụ: code, lập trình, sức khoẻ, cá nhân), "
-            "hãy khéo léo từ chối và nhắc họ rằng bạn chỉ hỗ trợ giải thích thuật ngữ Riskism."
+            "1. Luôn trả lời bằng tiếng Việt, thân thiện, dễ hiểu.\n"
+            "2. Ưu tiên ngắn gọn, thực dụng, thường dưới 180 chữ.\n"
+            "3. Nếu câu hỏi liên quan Riskism, danh mục, thị trường, AI report hoặc metric rủi ro, hãy dùng app_context để trả lời bằng số liệu cụ thể khi có.\n"
+            "4. Nếu câu hỏi ngoài app, vẫn trả lời trực tiếp và tự nhiên; không được từ chối máy móc chỉ vì ngoài phạm vi tài chính.\n"
+            "5. Nếu app_context chưa đủ dữ liệu cho câu hỏi cụ thể, nói rõ phần nào bạn chưa nhìn thấy thay vì bịa.\n"
+            "6. Không bịa dữ liệu realtime ngoài app_context."
         )
 
         # Build prompt from history
         context = ""
-        for h in history[-5:]: # Only keep last 5 for context
+        for h in history[-6:]:
             if h.get('sender') == 'user':
                 context += f"\nUser: {h.get('text')}"
             else:
                 context += f"\nAssistant: {h.get('text')}"
-                
-        prompt = f"Lịch sử trò chuyện gần đây:\n{context}\n\nUser: {message}\nAssistant:"
+
+        prompt = (
+            f"App context hiện tại (JSON):\n{self._format_chat_context(app_context)}\n\n"
+            f"Lịch sử trò chuyện gần đây:\n{context}\n\n"
+            f"User: {message}\nAssistant:"
+        )
         
         reply = self._call_gemini(
             prompt, system,
             temperature=0.4,
             model_tier="fast"
         )
+        # BUG FIX: Expose AI failure openly instead of masking it entirely with a normal-sounding fallback
         if isinstance(reply, str) and reply.startswith("⚠️ [Sự cố AI]"):
-            return self._heuristic_chat_reply(message)
+            fallback = contextual_reply or self._heuristic_chat_reply(message, app_context)
+            if "Riskism lẫn câu hỏi ngoài luồng" in fallback or "Chào bạn" in fallback:
+                return f"{reply}\n\n💡 Gợi ý tạm thời: {fallback}"
+            else:
+                return f"{reply}\n\n💡 Trả lời tự động: {fallback}"
+                
         return reply
 
     def _mock_response(self, prompt: str, is_error: bool = False, error_detail: str = "") -> str:
@@ -611,11 +909,11 @@ Phân tích (JSON):
             })
         elif 'reflection' in prompt.lower():
             return json.dumps({
-                'accuracy_score': 0.5,
-                'what_was_right': f'[Chế độ Demo] Đang sử dụng logic phản chiếu mẫu.{error_context}',
-                'what_was_wrong': '[Chế độ Demo] Không thể truy cập Gemini để tự đánh giá.',
-                'lesson_learned': 'Cần kiểm tra lại cấu hình API Key trong file .env.',
-                'improvement_suggestion': 'Cập nhật Gemini API Key mới để kích hoạt AI tinh chỉnh rủi ro.',
+                'accuracy_score': 0.0,
+                'what_was_right': f'⚠️ AI đang gặp sự cố kết nối.{error_context}',
+                'what_was_wrong': 'Chế độ Demo: Không thể phân tích chéo dữ liệu do giới hạn API quota.',
+                'lesson_learned': 'Cần kiểm tra lại Google Cloud Console hoặc thay API Key mới có đủ dung lượng.',
+                'improvement_suggestion': 'Hệ thống đang tạm dùng logic dự phòng để không làm gián đoạn dashboard.',
             })
         elif 'dự báo' in prompt.lower() or 'prediction' in prompt.lower():
             return json.dumps({

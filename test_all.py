@@ -434,7 +434,7 @@ try:
     # Check requirements.txt
     with open(os.path.join(base, 'requirements.txt')) as f:
         reqs = f.read()
-    for pkg in ['fastapi', 'uvicorn', 'sqlalchemy', 'redis', 'celery', 'numpy', 'scipy']:
+    for pkg in ['fastapi', 'uvicorn', 'sqlalchemy', 'redis', 'celery', 'numpy', 'scipy', 'slowapi', 'limits', 'python-jose']:
         assert pkg in reqs, f"requirements.txt thiếu: {pkg}"
     print(f"  ✅ requirements.txt: đầy đủ các thư viện")
 
@@ -446,9 +446,178 @@ except Exception as e:
     print(f"  ❌ FAIL: {e}")
 
 
+# ─── TEST 8: AI Insight & Chatbot Fallbacks ─────────────
+print("\n🤖 Test 8: AI Insight & Chatbot fallbacks")
+try:
+    from backend.agent.llm_router import LLMRouter
+
+    router = LLMRouter()
+    router.client = None
+
+    mock_risk_metrics = {
+        'AAA': {'risk_score': 78, 'beta': 1.34, 'var_95': -0.041},
+        'BBB': {'risk_score': 52, 'beta': 0.91, 'var_95': -0.024},
+        'CCC': {'risk_score': 33, 'beta': 0.62, 'var_95': -0.013},
+        'VNINDEX': {'risk_score': 50, 'beta': 1.0, 'var_95': -0.02},
+    }
+
+    fallback_insight = router.generate_insight(
+        mock_risk_metrics,
+        news_summary='',
+        anomalies=[],
+        user_profile={'risk_appetite': 'moderate', 'capital_amount': 50_000_000},
+    )
+    trend_symbols = [item.get('ticker') for item in fallback_insight.get('trends', [])]
+    assert trend_symbols, "Fallback insight phải có stock trends"
+    assert 'VNINDEX' not in trend_symbols, "Fallback insight không được đẩy VNINDEX vào stock trends"
+    assert trend_symbols[0] == 'AAA', f"Trend đầu tiên phải là mã rủi ro cao nhất AAA, nhưng = {trend_symbols[0]}"
+    print(f"  ✅ Insight fallback: trends bám danh mục thật {trend_symbols}")
+
+    app_help_reply = router.chat_assistant('app này giúp dcg gi', [], {})
+    normalized_help = app_help_reply.lower()
+    assert any(token in normalized_help for token in ('riskism', 'danh mục', 'var', 'tail risk')), \
+        f"Chatbot phải trả lời được câu hỏi khả năng app, nhưng nhận: {app_help_reply}"
+    print("  ✅ Chatbot fallback: trả lời được câu hỏi 'app này giúp dcg gi'")
+
+    requirement_reply = router.chat_assistant('giúp mình bóc requirement cho chatbot', [], {})
+    normalized_requirement = requirement_reply.lower()
+    assert any(token in normalized_requirement for token in ('requirement', 'yêu cầu', 'acceptance criteria', 'scope')), \
+        f"Chatbot phải hỗ trợ requirement, nhưng nhận: {requirement_reply}"
+    print("  ✅ Chatbot fallback: trả lời được câu hỏi requirement")
+
+    passed += 1
+    print("  ✅ PASS — AI insight fallback và chatbot heuristic hoạt động đúng!")
+
+except Exception as e:
+    errors.append(f"AI Insight/Chatbot: {e}")
+    print(f"  ❌ FAIL: {e}")
+
+
+# ─── TEST 9: Market Client Contract ────────────────────
+print("\n📈 Test 9: Market Client contract")
+try:
+    from backend.data.vnstock_client import VnstockClient
+
+    client = VnstockClient()
+    assert client.CACHE_TTL_SECONDS == 300, f"Cache TTL phải là 300s, nhưng = {client.CACHE_TTL_SECONDS}"
+
+    demo_history = client._make_demo_ohlcv('VNINDEX', days=3)
+    required_history_keys = {'symbol', 'dates', 'open', 'high', 'low', 'close', 'volume'}
+    assert required_history_keys.issubset(demo_history.keys()), f"OHLCV demo thiếu key: {required_history_keys - set(demo_history.keys())}"
+    assert demo_history['symbol'] == 'VNINDEX', f"Symbol phải là VNINDEX, nhưng = {demo_history['symbol']}"
+    assert len(demo_history['dates']) == 3, f"Phải có đúng 3 daily bars, nhưng = {len(demo_history['dates'])}"
+    assert len(demo_history['close']) == len(demo_history['open']) == len(demo_history['high']) == len(demo_history['low']) == len(demo_history['volume']) == 3
+    print("  ✅ Demo OHLCV fallback: đúng shape cho frontend")
+
+    snapshot = client._build_snapshot_from_history('VNINDEX', demo_history)
+    required_snapshot_keys = {'symbol', 'price', 'previous_close', 'open', 'high', 'low', 'volume', 'change', 'change_pct', 'timestamp'}
+    assert snapshot and required_snapshot_keys.issubset(snapshot.keys()), f"Snapshot thiếu key: {required_snapshot_keys - set((snapshot or {}).keys())}"
+    assert snapshot['symbol'] == 'VNINDEX', f"Snapshot symbol phải là VNINDEX, nhưng = {snapshot['symbol']}"
+    print("  ✅ Latest price snapshot: đúng response contract")
+
+    demo_symbols = client._demo_symbols()
+    assert any(item['symbol'] == 'VNINDEX' for item in demo_symbols), "Demo symbol universe phải có VNINDEX"
+    print("  ✅ Search fallback universe: có VNINDEX để giữ search/search-fallback ổn định")
+
+    passed += 1
+    print("  ✅ PASS — Market client giữ đúng contract backend/frontend!")
+
+except Exception as e:
+    errors.append(f"Market Client: {e}")
+    print(f"  ❌ FAIL: {e}")
+
+
+# ─── TEST 10: Rate Limiting Contract ───────────────────
+print("\n⏱️ Test 10: Rate limiting contract")
+try:
+    import json as _json
+    import importlib.util
+    from types import SimpleNamespace
+    fastapi_available = importlib.util.find_spec('fastapi') is not None
+    jose_available = importlib.util.find_spec('jose') is not None
+
+    if fastapi_available and jose_available:
+        from backend.main import (
+            _fallback_rate_limiter_for_request,
+            _rate_limit_response,
+            general_rate_limiter,
+            auth_rate_limiter,
+            agent_rate_limiter,
+        )
+
+        agent_request = SimpleNamespace(method='POST', url=SimpleNamespace(path='/api/agent/trigger'))
+        login_request = SimpleNamespace(method='POST', url=SimpleNamespace(path='/api/auth/login'))
+        signup_request = SimpleNamespace(method='POST', url=SimpleNamespace(path='/api/auth/signup'))
+        market_request = SimpleNamespace(method='GET', url=SimpleNamespace(path='/api/market/VCB'))
+
+        assert _fallback_rate_limiter_for_request(agent_request) is agent_rate_limiter, "Agent trigger phải dùng bucket 5 req/min"
+        assert _fallback_rate_limiter_for_request(login_request) is auth_rate_limiter, "Login phải dùng bucket 10 req/min"
+        assert _fallback_rate_limiter_for_request(signup_request) is auth_rate_limiter, "Signup phải dùng bucket 10 req/min"
+        assert _fallback_rate_limiter_for_request(market_request) is general_rate_limiter, "General endpoint phải dùng bucket 60 req/min"
+        print("  ✅ Route buckets: đúng mapping general/auth/agent")
+
+        response = _rate_limit_response(7)
+        payload = _json.loads(response.body.decode())
+        assert response.status_code == 429, f"Status code phải là 429, nhưng = {response.status_code}"
+        assert payload == {"detail": "Rate limit exceeded. Try again in 7s."}, f"JSON 429 sai format: {payload}"
+        assert response.headers.get("Retry-After") == "7", f"Retry-After header phải là 7, nhưng = {response.headers.get('Retry-After')}"
+        print("  ✅ 429 response: đúng JSON + Retry-After header")
+    else:
+        main_source = (repo_root / 'backend' / 'main.py').read_text()
+        assert 'slowapi' in main_source, "main.py phải import slowapi"
+        assert 'default_limits=["60/minute"]' in main_source, "General limit 60/min chưa được cấu hình"
+        assert '@limit_decorator("5/minute")' in main_source, "Agent trigger phải có limit 5/minute"
+        assert main_source.count('@limit_decorator("10/minute")') >= 2, "Login và signup phải có limit 10/minute"
+        assert 'Rate limit exceeded. Try again in' in main_source, "429 JSON contract chưa có trong main.py"
+        print("  ✅ Static contract check: slowapi config + 429 message đã có trong source")
+
+    passed += 1
+    print("  ✅ PASS — Rate limiting giữ đúng contract backend!")
+
+except Exception as e:
+    errors.append(f"Rate Limiting: {e}")
+    print(f"  ❌ FAIL: {e}")
+
+
+# ─── TEST 11: JWT Auth Contract ─────────────────────────
+print("\n🔐 Test 11: JWT auth contract")
+try:
+    main_source = (repo_root / 'backend' / 'main.py').read_text()
+    config_source = (repo_root / 'backend' / 'config.py').read_text()
+    env_source = (repo_root / '.env.example').read_text()
+    req_source = (repo_root / 'requirements.txt').read_text()
+
+    assert 'python-jose' in req_source, "requirements.txt phải có python-jose"
+    assert 'SECRET_KEY=' in env_source, ".env.example phải khai báo SECRET_KEY"
+    assert 'jwt_secret_key' in config_source, "config.py phải expose jwt_secret_key"
+    assert 'HTTPBearer' in main_source and 'Depends(get_current_user)' in main_source, "main.py phải dùng Bearer auth dependency"
+    assert '"access_token"' in main_source and '"token_type"' in main_source, "login/signup phải trả về access_token + token_type"
+    for route in [
+        '@app.get("/api/auth/me")',
+        '@app.post("/api/portfolio/update")',
+        '@app.get("/api/portfolio")',
+        '@app.get("/api/portfolio/risk")',
+        '@app.get("/api/insights")',
+        '@app.get("/api/predictions")',
+        '@app.get("/api/predictions/history")',
+    ]:
+        assert route in main_source, f"Thiếu protected route JWT mới: {route}"
+    assert '/api/portfolio/{user_id}' not in main_source, "Portfolio endpoint cũ theo user_id phải được bỏ"
+    assert 'payload.user_id' not in main_source, "Agent trigger không được lấy user_id từ body nữa"
+    print("  ✅ JWT dependencies/config: đã có SECRET_KEY + python-jose")
+    print("  ✅ Protected routes: đã chuyển sang current-user context")
+
+    passed += 1
+    print("  ✅ PASS — JWT auth contract giữ đúng yêu cầu!")
+
+except Exception as e:
+    errors.append(f"JWT Auth: {e}")
+    print(f"  ❌ FAIL: {e}")
+
+
 # ─── KẾT QUẢ TỔNG ────────────────────────────────────────
 print("\n" + "=" * 60)
-print(f"📊 KẾT QUẢ: {passed}/7 tests PASSED")
+print(f"📊 KẾT QUẢ: {passed}/11 tests PASSED")
 if errors:
     print(f"❌ LỖI ({len(errors)}):")
     for e in errors:

@@ -3,6 +3,8 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 websockets==14.1
 python-multipart==0.0.19
+slowapi==0.1.9
+limits==3.13.0
 
 # Database
 sqlalchemy==2.0.36
@@ -21,6 +23,7 @@ google-genai==1.0.0
 firebase-admin==6.7.0
 
 # Data - Vietnamese Stock Market
+vnstock3>=0.3.0.7
 vnstock>=3.4.0
 
 # Data Processing
@@ -38,3 +41,4 @@ python-dotenv==1.0.1
 pydantic==2.10.4
 pydantic-settings==2.7.1
 python-dateutil==2.9.0
+python-jose[cryptography]==3.3.0

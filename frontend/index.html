@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=DM+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/styles.css?v=25">
+    <link rel="stylesheet" href="css/styles.css?v=29">
 </head>
 <body>
     <!-- ═══ TOP BAR: Brand + Market Tabs + Live Ticker ═══ -->
@@ -151,7 +151,7 @@
                 </div>
                 
                 <!-- AI Reflection Mode -->
-                <div class="card card-ai" id="card-reflection" style="margin-top: 16px;">
+                <div class="card card-ai" id="card-reflection-preview" style="margin-top: 16px;">
                     <div class="card-top">
                         <h2 class="card-title">🧠 AI Reflection Loop</h2>
                         <span class="badge badge-risk" id="reflection-score">-- ACCURACY</span>
@@ -368,7 +368,7 @@
                 </div>
 
                 <!-- Self-Reflection -->
-                <div class="card" id="card-reflection">
+                <div class="card" id="card-reflection-report">
                     <div class="card-top">
                         <h2 class="card-title">🔄 Self-Reflection Loop</h2>
                         <span class="badge">FEEDBACK</span>
@@ -516,24 +516,24 @@
             <div class="chat-header">
                 <div>
                     <h3 style="margin: 0; font-size: 0.95rem;">Riskism Assistant</h3>
-                    <span style="font-size: 0.7rem; font-weight: normal; color: rgba(255,255,255,0.8);">Hỏi đáp thuật ngữ rủi ro</span>
+                    <span style="font-size: 0.7rem; font-weight: normal; color: rgba(255,255,255,0.8);">In-app + general assistant</span>
                 </div>
                 <button id="chat-close-btn" class="icon-btn" style="color: white;">✕</button>
             </div>
             <div id="chat-messages" class="chat-messages">
-                <div class="chat-bubble ai">Xin chào! 👋 Mình là trợ lý AI Riskism. Mình ở đây để giúp newbie hiểu rõ các thuật ngữ như VaR, CVaR, Sharpe, hoặc Agentic Reflection Loop. Bạn cứ hỏi nhé!</div>
+                <div class="chat-bubble ai">Xin chào! Mình là trợ lý AI Riskism. Bạn có thể hỏi cả chuyện trong app như danh mục, VaR, tail risk, VN-Index, hoặc hỏi ngoài luồng như học tập, công việc, công nghệ. Nếu câu hỏi liên quan danh mục hiện tại, mình sẽ cố bám vào dữ liệu đang mở để trả lời sát hơn.</div>
             </div>
             <div class="chat-input-area">
-                <input type="text" id="chat-input" placeholder="Nhập câu hỏi..." autocomplete="off" />
+                <input type="text" id="chat-input" placeholder="Hỏi về danh mục hoặc bất kỳ điều gì..." autocomplete="off" />
                 <button id="chat-send-btn" class="btn-primary" style="padding: 0 12px;">Gửi</button>
             </div>
         </div>
     </div>
 
-    <script src="js/api.js?v=25"></script>
-    <script src="js/charts.js?v=25"></script>
-    <script src="js/components.js?v=25"></script>
-    <script src="js/firebase-auth.js?v=25"></script>
-    <script src="js/app.js?v=25"></script>
+    <script src="js/api.js?v=31"></script>
+    <script src="js/charts.js?v=31"></script>
+    <script src="js/components.js?v=31"></script>
+    <script src="js/firebase-auth.js?v=31"></script>
+    <script src="js/app.js?v=31"></script>
 </body>
 </html>
