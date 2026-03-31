@@ -1,6 +1,6 @@
 from backend.risk_engine.core_metrics import (
     compute_all_metrics, RiskMetrics,
-    calculate_var, calculate_cvar, calculate_beta,
+    calculate_var, calculate_cvar, calculate_beta, calculate_beta_dimson,
     calculate_sharpe_ratio, calculate_sortino_ratio,
     calculate_calmar_ratio, calculate_information_ratio,
     calculate_max_drawdown, calculate_returns,
@@ -8,6 +8,7 @@ from backend.risk_engine.core_metrics import (
 )
 from backend.risk_engine.portfolio_metrics import (
     compute_portfolio_metrics, PortfolioMetrics,
+    build_sector_benchmark_exposure, calculate_sector_gap,
 )
 from backend.risk_engine.capital_aware import (
     generate_capital_advice, CapitalAdvice, SECTOR_MAP,
@@ -21,8 +22,9 @@ __all__ = [
     'compute_portfolio_metrics', 'PortfolioMetrics',
     'generate_capital_advice', 'CapitalAdvice', 'SECTOR_MAP',
     'scan_all_anomalies', 'Anomaly',
-    'calculate_var', 'calculate_cvar', 'calculate_beta',
+    'calculate_var', 'calculate_cvar', 'calculate_beta', 'calculate_beta_dimson',
     'calculate_sharpe_ratio', 'calculate_sortino_ratio',
     'calculate_calmar_ratio', 'calculate_information_ratio',
     'calculate_max_drawdown', 'calculate_returns',
+    'build_sector_benchmark_exposure', 'calculate_sector_gap',
 ]

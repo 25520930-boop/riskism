@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=DM+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/styles.css?v=20">
+    <link rel="stylesheet" href="css/styles.css?v=25">
 </head>
 <body>
     <!-- ═══ TOP BAR: Brand + Market Tabs + Live Ticker ═══ -->
@@ -34,7 +34,7 @@
                 <div class="notify-panel" id="notify-panel">
                     <div class="notify-panel-header">Alerts & Anomalies</div>
                     <div class="notify-panel-body" id="notify-list">
-                        <div class="notify-empty">No alerts yet. Run AI Agent to detect anomalies.</div>
+                        <div class="notify-empty">No alerts yet. Hệ thống đang tự quét anomaly trong nền.</div>
                     </div>
                 </div>
             </div>
@@ -127,12 +127,12 @@
                         <span class="badge badge-risk medium" id="ai-risk-badge">ANALYZING...</span>
                     </div>
                     <p class="ai-summary" id="ai-summary">
-                        Đang phân tích dữ liệu danh mục... Nhấn "Run AI" để nhận insight từ AI Agent.
+                        Đang phân tích dữ liệu danh mục và tin thị trường. Insight AI sẽ tự cập nhật khi chu kỳ nền hoàn tất.
                     </p>
                     <div class="ai-signals" id="ai-signals">
                         <div class="signal-item">
                             <span class="signal-icon check">✓</span>
-                            <span>Portfolio risk metrics đã sẵn sàng — nhấn Run AI để phân tích chuyên sâu.</span>
+                            <span>Portfolio risk metrics đã sẵn sàng và sẽ tự đồng bộ sang báo cáo AI mới nhất.</span>
                         </div>
                     </div>
                     <table class="ai-trends" id="ai-trends">
@@ -272,10 +272,8 @@
                 <div class="card card-wide" id="card-pf-overview">
                     <div class="card-top">
                         <h2 class="card-title">Portfolio Overview</h2>
-                        <div style="display: flex; gap: 8px;">
+                        <div class="card-top-actions">
                             <button class="btn-outline" id="btn-edit-pf">⚙️ Manage Holdings</button>
-                            <button class="btn-primary" id="btn-run-agent">Morning Agent</button>
-                            <button class="btn-outline" id="btn-run-reflection">Afternoon Review</button>
                         </div>
                     </div>
                     <div class="pf-stats" id="pf-stats">
@@ -286,6 +284,10 @@
                         <div class="pf-stat"><span class="pf-stat-label">Diversification</span><span class="pf-stat-value mono" id="pf-div">—</span></div>
                         <div class="pf-stat"><span class="pf-stat-label">Vol Regime</span><span class="pf-stat-value" id="pf-vol">—</span></div>
                         <div class="pf-stat"><span class="pf-stat-label">HHI Index</span><span class="pf-stat-value mono" id="pf-hhi">—</span></div>
+                        <div class="pf-stat"><span class="pf-stat-label">Adj VaR T+2</span><span class="pf-stat-value mono" id="pf-adjvar">—</span></div>
+                        <div class="pf-stat"><span class="pf-stat-label">CVaR 95%</span><span class="pf-stat-value mono" id="pf-cvar">—</span></div>
+                        <div class="pf-stat"><span class="pf-stat-label">VN30 Corr</span><span class="pf-stat-value mono" id="pf-vn30corr">—</span></div>
+                        <div class="pf-stat"><span class="pf-stat-label">Sector Gap</span><span class="pf-stat-value" id="pf-gap">—</span></div>
                     </div>
                 </div>
 
@@ -309,7 +311,7 @@
                 <div class="card" id="card-advice">
                     <div class="card-top"><h2 class="card-title">💡 Capital Advice</h2></div>
                     <div class="advice-content" id="advice-content">
-                        <div class="empty-msg">Run Agent to get personalized advice</div>
+                        <div class="empty-msg">Capital advice sẽ tự cập nhật theo danh mục và dữ liệu thị trường.</div>
                     </div>
                 </div>
 
@@ -350,7 +352,7 @@
                         </div>
                     </div>
                     <div class="report-body" id="report-body">
-                        <div class="empty-msg">Click <strong>"Run AI"</strong> on the Dashboard to generate your first risk report</div>
+                        <div class="empty-msg">Báo cáo AI sẽ xuất hiện tự động sau khi chu kỳ phân tích nền hoàn tất.</div>
                     </div>
                 </div>
 
@@ -361,7 +363,7 @@
                         <span class="badge">LEARNING HISTORY</span>
                     </div>
                     <div class="timeline-body" id="timeline-body">
-                        <div class="empty-msg">Run Morning Agent + Afternoon Review to build prediction history</div>
+                        <div class="empty-msg">Prediction timeline sẽ tự cập nhật sau các chu kỳ phân tích và reflection chạy ngầm.</div>
                     </div>
                 </div>
 
@@ -382,7 +384,7 @@
                         <h2 class="card-title">📋 Agent Execution Log</h2>
                     </div>
                     <div class="log-body" id="log-body">
-                        <div class="empty-msg">Agent has not been triggered yet</div>
+                        <div class="empty-msg">Chu kỳ AI nền chưa hoàn tất nên log vẫn đang chờ dữ liệu.</div>
                     </div>
                 </div>
             </div>
@@ -488,6 +490,7 @@
                 <button class="icon-btn" onclick="document.getElementById('modal-portfolio').classList.remove('active')">✕</button>
             </div>
             <div class="modal-body">
+                <p class="modal-desc">Lưu thay đổi để cập nhật holdings ngay, đồng thời hệ thống sẽ tự làm mới AI report, reflection và execution log trong nền.</p>
                 <div class="form-group">
                     <label>Total Capital Strategy (VND)</label>
                     <input type="number" id="edit-pf-capital" class="form-input mono" placeholder="e.g. 50000000">
@@ -499,7 +502,7 @@
                 <button class="btn-outline w-full" id="btn-add-holding" style="margin-top: 12px;">+ Add Position</button>
             </div>
             <div class="modal-footer">
-                <button class="btn-primary w-full" id="btn-save-portfolio">Save Portfolio & Reload</button>
+                <button class="btn-primary w-full" id="btn-save-portfolio">Save Portfolio</button>
             </div>
         </div>
     </div>
@@ -527,10 +530,10 @@
         </div>
     </div>
 
-    <script src="js/api.js?v=20"></script>
-    <script src="js/charts.js?v=20"></script>
-    <script src="js/components.js?v=20"></script>
-    <script src="js/firebase-auth.js?v=20"></script>
-    <script src="js/app.js?v=20"></script>
+    <script src="js/api.js?v=25"></script>
+    <script src="js/charts.js?v=25"></script>
+    <script src="js/components.js?v=25"></script>
+    <script src="js/firebase-auth.js?v=25"></script>
+    <script src="js/app.js?v=25"></script>
 </body>
 </html>

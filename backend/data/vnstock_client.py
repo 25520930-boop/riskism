@@ -219,7 +219,15 @@ class VnstockClient:
 
     def get_market_index(self, days: int = 180) -> Optional[Dict]:
         """Fetch VN-Index historical data. Returns None on error."""
-        cache_key = f"vnindex:{days}"
+        return self.get_index_data('VNINDEX', days)
+
+    def get_index_data(self, symbol: str, days: int = 180) -> Optional[Dict]:
+        """Fetch historical data for benchmark indexes such as VNINDEX or VN30."""
+        symbol = (symbol or '').upper().strip()
+        if not symbol:
+            return None
+
+        cache_key = f"index:{symbol}:{days}"
         cached = self._get_cache(cache_key)
         if cached:
             return json.loads(cached)
@@ -229,7 +237,7 @@ class VnstockClient:
 
         try:
             df, source = self._fetch_history_with_sources(
-                'VNINDEX',
+                symbol,
                 days,
                 self.INDEX_SOURCES,
                 normalize_index=True,
@@ -238,7 +246,7 @@ class VnstockClient:
                 return None
 
             result = {
-                'symbol': 'VNINDEX',
+                'symbol': symbol,
                 'dates': df['time'].astype(str).tolist() if 'time' in df.columns else [],
                 'close': df['close'].tolist() if 'close' in df.columns else [],
                 'volume': df['volume'].tolist() if 'volume' in df.columns else [],
@@ -248,8 +256,55 @@ class VnstockClient:
             return result
 
         except Exception as e:
-            print(f"[VnstockClient] VN-Index error: {e}")
+            print(f"[VnstockClient] {symbol} index error: {e}")
             return None
+
+    def get_vn30_constituents(self) -> List[str]:
+        """Fetch VN30 membership from vnstock listing metadata."""
+        cache_key = "benchmark:vn30:constituents"
+        cached = self._get_cache(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        if not VNSTOCK_AVAILABLE:
+            return []
+
+        try:
+            listing = None
+            errors = []
+            for source in self.STOCK_SOURCES:
+                try:
+                    listing = self._get_stock('VCB', source).listing
+                    raw = listing.symbols_by_group('VN30')
+                    if raw is None:
+                        continue
+
+                    if hasattr(raw, 'tolist'):
+                        symbols = raw.tolist()
+                    elif isinstance(raw, (list, tuple, set)):
+                        symbols = list(raw)
+                    else:
+                        symbols = [raw]
+
+                    normalized = []
+                    for item in symbols:
+                        value = str(item).strip().upper()
+                        if value:
+                            normalized.append(value)
+
+                    unique_symbols = sorted(set(normalized))
+                    if unique_symbols:
+                        self._set_cache(cache_key, json.dumps(unique_symbols), 86400)
+                        return unique_symbols
+                except Exception as e:
+                    errors.append(f"{source}: {e}")
+
+            if errors:
+                print(f"[VnstockClient] VN30 membership error: {' | '.join(errors)}")
+            return []
+        except Exception as e:
+            print(f"[VnstockClient] VN30 membership error: {e}")
+            return []
 
     def get_market_index_snapshot(self) -> Optional[Dict]:
         """Get latest VN-Index snapshot with short cache for ticker usage."""
@@ -396,18 +451,27 @@ class VnstockClient:
         """Async wrapper for VN-Index."""
         return await asyncio.to_thread(self.get_market_index, days)
 
+    async def get_index_data_async(self, symbol: str, days: int = 180) -> Optional[Dict]:
+        """Async wrapper for benchmark index history."""
+        return await asyncio.to_thread(self.get_index_data, symbol, days)
+
     async def get_market_index_snapshot_async(self) -> Optional[Dict]:
         """Async wrapper for latest VN-Index snapshot."""
         return await asyncio.to_thread(self.get_market_index_snapshot)
+
+    async def get_vn30_constituents_async(self) -> List[str]:
+        """Async wrapper for VN30 membership."""
+        return await asyncio.to_thread(self.get_vn30_constituents)
 
     async def search_symbols_async(self, query: str, limit: int = 8) -> List[Dict]:
         """Async wrapper for symbol search."""
         return await asyncio.to_thread(self.search_symbols, query, limit)
 
     async def fetch_multiple_async(self, symbols: List[str], days: int = 180) -> Dict:
-        """Fetch data for multiple symbols + VNINDEX concurrently."""
+        """Fetch data for multiple symbols + benchmark indexes concurrently."""
         tasks = [self.get_historical_data_async(s, days) for s in symbols]
         tasks.append(self.get_market_index_async(days))
+        tasks.append(self.get_index_data_async('VN30', days))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -417,8 +481,12 @@ class VnstockClient:
             if isinstance(res, dict) and res:
                 market_data[symbol] = res
 
-        vnindex = results[-1]
+        vnindex = results[-2]
         if isinstance(vnindex, dict) and vnindex:
             market_data['VNINDEX'] = vnindex
+
+        vn30 = results[-1]
+        if isinstance(vn30, dict) and vn30:
+            market_data['VN30'] = vn30
 
         return market_data

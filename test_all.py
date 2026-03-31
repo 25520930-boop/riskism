@@ -23,7 +23,8 @@ try:
         calculate_returns, calculate_var, calculate_cvar,
         calculate_beta, calculate_sharpe_ratio, calculate_sortino_ratio,
         calculate_max_drawdown, calculate_volatility, calculate_risk_score,
-        compute_all_metrics, compute_portfolio_risk_summary
+        compute_all_metrics, compute_portfolio_risk_summary,
+        calculate_beta_dimson,
     )
 
     # Tạo dữ liệu giả: 100 ngày giá cổ phiếu
@@ -52,6 +53,13 @@ try:
     beta_exact = calculate_beta(doubled_stock, doubled_market)
     assert abs(beta_exact - 2.0) < 1e-9, f"Beta 2x market phải = 2.0, nhưng = {beta_exact}"
     print(f"  ✅ calculate_beta regression: 2x benchmark → beta={beta_exact:.4f}")
+
+    delayed_market = np.array([0.01, 0.02, -0.01, 0.03, -0.02, 0.01, 0.015, -0.005, 0.02, -0.01])
+    delayed_stock = np.array([0.0, 0.01, 0.02, -0.01, 0.03, -0.02, 0.01, 0.015, -0.005, 0.02])
+    beta_plain = calculate_beta(delayed_stock, delayed_market)
+    beta_dimson = calculate_beta_dimson(delayed_stock, delayed_market)
+    assert beta_dimson > beta_plain, f"Dimson beta phải bù được lead/lag tốt hơn beta thường ({beta_dimson} <= {beta_plain})"
+    print(f"  ✅ calculate_beta_dimson regression: delayed stock → beta={beta_plain:.4f}, dimson={beta_dimson:.4f}")
 
     sharpe = calculate_sharpe_ratio(returns)
     print(f"  ✅ calculate_sharpe_ratio: {sharpe:.4f}")
@@ -126,7 +134,48 @@ try:
     )
     mixed_risk = mixed_summary['current_risk']
     assert any(abs(mixed_risk[k]) > 1e-12 for k in ['var_95', 'max_drawdown']), f"Mixed date formats không được làm portfolio risk về 0: {mixed_risk}"
+    assert 'adjusted_var_95' in mixed_risk and abs(mixed_risk['adjusted_var_95']) >= abs(mixed_risk['var_95']), "Adjusted VaR phải tồn tại và có độ lớn >= VaR"
+    assert 'adjusted_cvar_95' in mixed_risk and abs(mixed_risk['adjusted_cvar_95']) >= abs(mixed_risk['cvar_95']), "Adjusted CVaR phải tồn tại và có độ lớn >= CVaR"
+    assert 'beta_dimson' in mixed_risk, "Portfolio risk phải expose beta_dimson"
+    assert 'liquidity_profile' in mixed_risk and 'effective_horizon_days' in mixed_risk['liquidity_profile'], "Portfolio risk phải expose liquidity_profile"
+    stress = mixed_risk.get('stress_scenarios', {})
+    assert 'worst_1d' in stress, f"Stress scenarios phải có worst_1d: {stress}"
     print("  ✅ compute_portfolio_risk_summary regression: mixed date formats vẫn align đúng")
+
+    stress_market_data = {
+        'AAA': {'dates': ['2024-02-01', '2024-02-02', '2024-02-03', '2024-02-04', '2024-02-05', '2024-02-06'], 'close': [100, 96, 98, 92, 90, 95]},
+        'VNINDEX': {'dates': ['2024-02-01', '2024-02-02', '2024-02-03', '2024-02-04', '2024-02-05', '2024-02-06'], 'close': [1000, 990, 995, 975, 970, 980]},
+    }
+    stress_summary = compute_portfolio_risk_summary(
+        [{'symbol': 'AAA', 'quantity': 1, 'avg_price': 100}],
+        {'AAA': calculate_returns(np.array([100, 96, 98, 92, 90, 95], dtype=float))},
+        stress_market_data,
+    )
+    stress_risk = stress_summary['current_risk'].get('stress_scenarios', {})
+    assert all(k in stress_risk for k in ['worst_1d', 'worst_3d', 'worst_5d']), f"Stress scenarios thiếu field khi đủ history: {stress_risk}"
+    print("  ✅ compute_portfolio_risk_summary regression: adjusted VaR/CVaR, beta_dimson, stress scenarios đầy đủ")
+
+    long_dates = [f'2024-03-{day:02d}' for day in range(1, 13)]
+    contributor_market_data = {
+        'AAA': {'dates': long_dates, 'close': [100, 101, 103, 102, 104, 107, 103, 99, 96, 98, 95, 93], 'volume': [100000, 110000, 95000, 98000, 105000, 100000, 102000, 97000, 96000, 99000, 94000, 93000]},
+        'BBB': {'dates': long_dates, 'close': [100, 100, 99, 98, 99, 97, 96, 95, 94, 93, 92, 91], 'volume': [25000, 26000, 24000, 23000, 22000, 21000, 20000, 19500, 19000, 18800, 18500, 18000]},
+        'VNINDEX': {'dates': long_dates, 'close': [1000, 1005, 1008, 1004, 1007, 1010, 1006, 999, 992, 995, 989, 985]},
+    }
+    contributor_summary = compute_portfolio_risk_summary(
+        [
+            {'symbol': 'AAA', 'quantity': 100, 'avg_price': 100},
+            {'symbol': 'BBB', 'quantity': 200, 'avg_price': 100},
+        ],
+        {
+            'AAA': calculate_returns(np.array(contributor_market_data['AAA']['close'], dtype=float)),
+            'BBB': calculate_returns(np.array(contributor_market_data['BBB']['close'], dtype=float)),
+        },
+        contributor_market_data,
+    )
+    contributor_risk = contributor_summary['current_risk']
+    assert contributor_risk['tail_risk_contributors'], "Portfolio risk phải có tail risk contributors khi đủ history"
+    assert contributor_risk['liquidity_profile']['positions'], "Liquidity profile phải có chi tiết theo mã"
+    print("  ✅ compute_portfolio_risk_summary regression: liquidity profile + tail risk contributors đã có")
 
     passed += 1
     print("  ✅ PASS — Core Metrics hoạt động đúng!")
@@ -141,7 +190,8 @@ print("\n📦 Test 2: Portfolio Metrics (portfolio_metrics.py)")
 try:
     from backend.risk_engine.portfolio_metrics import (
         calculate_hhi, calculate_effective_n, calculate_sector_exposure,
-        detect_volatility_regime, compute_portfolio_metrics
+        detect_volatility_regime, compute_portfolio_metrics,
+        build_sector_benchmark_exposure,
     )
 
     # Test HHI
@@ -168,11 +218,36 @@ try:
     assert abs(sum(exposure.values()) - 1.0) < 0.01, "Tổng sector exposure phải = 1"
     print(f"  ✅ Sector exposure: {exposure}")
 
+    inferred_exposure = calculate_sector_exposure([
+        {'symbol': 'VCB', 'value': 5000000},
+        {'symbol': 'FPT', 'value': 3000000},
+    ])
+    assert inferred_exposure.get('Banking', 0) > 0 and inferred_exposure.get('Technology', 0) > 0, f"Sector exposure phải suy ra được từ symbol: {inferred_exposure}"
+    print(f"  ✅ Sector exposure fallback: {inferred_exposure}")
+
     # Test volatility regime
     normal_returns = np.random.normal(0, 0.02, 100)
     regime = detect_volatility_regime(normal_returns)
     assert regime in ['low', 'normal', 'high', 'extreme']
     print(f"  ✅ Volatility regime: '{regime}'")
+
+    benchmark_sector_exposure = build_sector_benchmark_exposure(['VCB', 'FPT', 'VIC'])
+    trend_a = np.array([0.01, -0.005, 0.008, 0.004, -0.003] * 6, dtype=float)
+    trend_b = np.array([0.006, -0.002, 0.005, 0.003, -0.001] * 6, dtype=float)
+    vn30_returns = np.array([0.008, -0.003, 0.006, 0.003, -0.002] * 6, dtype=float)
+    pm = compute_portfolio_metrics(
+        [
+            {'symbol': 'VCB', 'market_value': 5000000},
+            {'symbol': 'FPT', 'market_value': 3000000},
+        ],
+        {'VCB': trend_a, 'FPT': trend_b},
+        market_returns=trend_a,
+        benchmark_returns=vn30_returns,
+        benchmark_sector_exposure=benchmark_sector_exposure,
+    ).to_dict()
+    assert pm['rolling_correlation_vn30'] is not None, "Portfolio metrics phải có rolling correlation vs VN30"
+    assert 'sector_gap_vs_vn30' in pm and 'Banking' in pm['sector_gap_vs_vn30'], f"Thiếu sector gap vs VN30: {pm}"
+    print(f"  ✅ compute_portfolio_metrics regression: rolling corr VN30 + sector gap đã có")
 
     passed += 1
     print("  ✅ PASS — Portfolio Metrics hoạt động đúng!")
@@ -324,7 +399,7 @@ except Exception as e:
 print("\n🐳 Test 7: Docker & SQL files")
 try:
     import os
-    base = '/Users/khuongdz/.gemini/antigravity/scratch/riskism'
+    base = str(repo_root)
 
     # Check all required files exist
     required_files = [

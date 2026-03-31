@@ -161,6 +161,47 @@ class LLMRouter:
     def _is_mock_payload(self, payload: Dict) -> bool:
         return self._payload_has_demo_marker(payload)
 
+    def _merge_payload_defaults(self, payload: Dict, defaults: Dict) -> Dict:
+        normalized = dict(defaults)
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                if value is not None:
+                    normalized[key] = value
+        return normalized
+
+    def _normalize_insight_payload(self, payload: Dict, fallback: Dict) -> Dict:
+        normalized = self._merge_payload_defaults(payload, fallback)
+
+        risk_level = str(normalized.get('risk_level') or fallback.get('risk_level') or 'medium').lower()
+        if risk_level not in {'low', 'medium', 'high', 'critical'}:
+            risk_level = fallback.get('risk_level', 'medium')
+        normalized['risk_level'] = risk_level
+
+        for list_key in ('key_findings', 'risk_factors', 'action_items', 'trends'):
+            if not isinstance(normalized.get(list_key), list):
+                normalized[list_key] = list(fallback.get(list_key, []))
+
+        try:
+            normalized['confidence_score'] = float(normalized.get('confidence_score', fallback.get('confidence_score', 0.5)))
+        except (TypeError, ValueError):
+            normalized['confidence_score'] = float(fallback.get('confidence_score', 0.5))
+
+        normalized['title'] = str(normalized.get('title') or fallback.get('title') or 'Báo cáo rủi ro hàng ngày')
+        normalized['summary'] = str(normalized.get('summary') or fallback.get('summary') or '')
+        return normalized
+
+    def _normalize_reflection_payload(self, payload: Dict, fallback: Dict) -> Dict:
+        normalized = self._merge_payload_defaults(payload, fallback)
+        try:
+            normalized['accuracy_score'] = float(normalized.get('accuracy_score', fallback.get('accuracy_score', 0.5)))
+        except (TypeError, ValueError):
+            normalized['accuracy_score'] = float(fallback.get('accuracy_score', 0.5))
+
+        for field in ('what_was_right', 'what_was_wrong', 'lesson_learned', 'improvement_suggestion'):
+            normalized[field] = str(normalized.get(field) or fallback.get(field) or '')
+
+        return normalized
+
     def _heuristic_sentiment(self, title: str, summary: str) -> Dict:
         text = f"{title} {summary}".lower()
         score = 0.0
@@ -386,20 +427,25 @@ TRẢ VỀ ĐỊNH DẠNG JSON:
     ]
 }}"""
 
-        return self._call_gemini_json(
+        fallback = {
+            'title': 'Báo cáo rủi ro hàng ngày',
+            'risk_level': 'medium',
+            'summary': 'Hệ thống đang thu thập và phân tích dữ liệu.',
+            'key_findings': ['Đang cập nhật dữ liệu...'],
+            'risk_factors': [],
+            'action_items': ['Theo dõi thêm'],
+            'confidence_score': 0.5,
+            'trends': [{'ticker': 'VNINDEX', 'trend': 'neutral', 'conf': 50}]
+        }
+
+        result = self._call_gemini_json(
             prompt, system, temperature=0.4,
-            fallback={
-                'title': 'Báo cáo rủi ro hàng ngày',
-                'risk_level': 'medium',
-                'summary': 'Hệ thống đang thu thập và phân tích dữ liệu.',
-                'key_findings': ['Đang cập nhật dữ liệu...'],
-                'risk_factors': [],
-                'action_items': ['Theo dõi thêm'],
-                'confidence_score': 0.5,
-                'trends': [{'ticker': 'VNINDEX', 'trend': 'neutral', 'conf': 50}]
-            },
+            fallback=fallback,
             model_tier="reasoning" # Use higher tier reasoning model for core insights
         )
+        if self._is_mock_payload(result):
+            return dict(fallback)
+        return self._normalize_insight_payload(result, fallback)
 
     def generate_morning_prediction(self, market_data: Dict, news_data: List[Dict]) -> Dict:
         """Generate morning market prediction."""
@@ -462,17 +508,22 @@ Phân tích (JSON):
     "improvement_suggestion": "<gợi ý cải thiện>"
 }}"""
 
-        return self._call_gemini_json(
+        fallback = {
+            'accuracy_score': 0.5,
+            'what_was_right': 'Đang phân tích',
+            'what_was_wrong': 'Đang phân tích',
+            'lesson_learned': 'Cần thêm dữ liệu',
+            'improvement_suggestion': 'Thu thập thêm dữ liệu',
+        }
+
+        result = self._call_gemini_json(
             prompt, system,
-            fallback={
-                'accuracy_score': 0.5,
-                'what_was_right': 'Đang phân tích',
-                'what_was_wrong': 'Đang phân tích',
-                'lesson_learned': 'Cần thêm dữ liệu',
-                'improvement_suggestion': 'Thu thập thêm dữ liệu',
-            },
+            fallback=fallback,
             model_tier="reasoning"
         )
+        if self._is_mock_payload(result):
+            return dict(fallback)
+        return self._normalize_reflection_payload(result, fallback)
 
     def _heuristic_chat_reply(self, message: str) -> str:
         text = (message or '').lower()

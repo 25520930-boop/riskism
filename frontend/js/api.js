@@ -267,8 +267,8 @@ class RiskismAPI {
         }
     }
 
-    async getAgentStatus() {
-        return await this.get('/api/agent/status');
+    async getAgentStatus(userId = 1) {
+        return await this.get(`/api/agent/status?user_id=${userId}`);
     }
 
     async getPredictions(userId = 1) {
@@ -402,13 +402,49 @@ class RiskismAPI {
     getDemoPortfolioRisk() {
         return {
             portfolio: this.getDemoPortfolio(),
+            portfolio_risk: {
+                var_95: -0.031,
+                cvar_95: -0.044,
+                cvar_99: -0.058,
+                adjusted_var_95: -0.055,
+                adjusted_cvar_95: -0.076,
+                sharpe_ratio: 0.92,
+                max_drawdown: 0.142,
+                beta: 1.08,
+                beta_dimson: 1.14,
+                liquidity_multiplier: 1.78,
+                liquidity_profile: {
+                    multiplier: 1.78,
+                    effective_horizon_days: 3.9,
+                    safe_adv_share: 0.2,
+                    locked_capital_pct: 0.18,
+                    worst_symbol: 'FPT',
+                    positions: [
+                        { symbol: 'FPT', weight: 0.32, liquidation_days: 2.4, liquidity_penalty: 1.19, locked_fraction: 0.27 },
+                        { symbol: 'VCB', weight: 0.45, liquidation_days: 1.6, liquidity_penalty: 1.07, locked_fraction: 0.0 },
+                    ],
+                },
+                stress_scenarios: { worst_1d: -0.034, worst_3d: -0.071, worst_5d: -0.096 },
+                stress_scenarios_detail: [
+                    { label: 'Worst 5D', horizon_days: 5, return: -0.096, start_date: '2026-03-11', end_date: '2026-03-17' },
+                    { label: 'Worst 3D', horizon_days: 3, return: -0.071, start_date: '2026-03-12', end_date: '2026-03-17' },
+                ],
+                tail_risk_contributors: [
+                    { symbol: 'HPG', contribution_pct: 0.44, driver: 'beta' },
+                    { symbol: 'FPT', contribution_pct: 0.31, driver: 'liquidity' },
+                    { symbol: 'VCB', contribution_pct: 0.25, driver: 'concentration' },
+                ],
+            },
             portfolio_metrics: {
                 hhi: 0.38,
                 effective_n: 2.63,
                 sector_exposure: { Banking: 0.45, Technology: 0.32, Industrial: 0.23 },
+                benchmark_sector_exposure: { Banking: 0.27, Technology: 0.1, Industrial: 0.17, RealEstate: 0.13, Consumer: 0.17, Energy: 0.07, Chemicals: 0.1 },
+                sector_gap_vs_vn30: { Banking: 0.18, Technology: 0.22, Industrial: 0.06, Consumer: -0.17, RealEstate: -0.13, Energy: -0.07, Chemicals: -0.1 },
                 max_sector_weight: 0.45,
                 total_value: 19700000,
                 diversification_score: 45,
+                rolling_correlation_vn30: 0.74,
                 volatility_regime: 'normal',
             },
             capital_advice: {
@@ -430,9 +466,9 @@ class RiskismAPI {
                 },
             },
             stock_risks: {
-                VCB: { risk_score: 35, var_95: -0.022, sharpe_ratio: 1.2, beta: 0.85 },
-                FPT: { risk_score: 42, var_95: -0.028, sharpe_ratio: 0.95, beta: 1.1 },
-                HPG: { risk_score: 65, var_95: -0.042, sharpe_ratio: 0.3, beta: 1.45 },
+                VCB: { risk_score: 35, var_95: -0.022, cvar_95: -0.031, sharpe_ratio: 1.2, beta: 0.85, beta_dimson: 0.89 },
+                FPT: { risk_score: 42, var_95: -0.028, cvar_95: -0.038, sharpe_ratio: 0.95, beta: 1.1, beta_dimson: 1.16 },
+                HPG: { risk_score: 65, var_95: -0.042, cvar_95: -0.058, sharpe_ratio: 0.3, beta: 1.45, beta_dimson: 1.52 },
             },
         };
     }

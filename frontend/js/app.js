@@ -190,6 +190,7 @@ class RiskismApp {
         this.runSafely('Bind notifications', () => this.bindNotifications());
         this.runSafely('Bind logout', () => this.bindLogout());
         this.runSafely('Bind keyboard shortcuts', () => this.bindKeyboardShortcuts());
+        this.runSafely('Init realtime feed', () => this.initRealtimeFeed());
         this.runSafely('Start clock', () => this.startClock());
         this.updateStatusBar('connected');
         this.runBackgroundTask('Load market ticker', () => this.loadMarketTicker());
@@ -205,6 +206,18 @@ class RiskismApp {
 
         // Export Report button
         document.getElementById('btn-export-report')?.addEventListener('click', () => this.exportReport());
+    }
+
+    initRealtimeFeed() {
+        api.onConnectionChange = (status) => this.updateStatusBar(status);
+        api.onAgentResult = (result) => {
+            if (!result) return;
+            const resultUserId = this.normalizeUserId(result.user_id);
+            if (resultUserId && resultUserId !== this.userId) return;
+            this.agentResult = result;
+            this.applyAgentResult(result);
+        };
+        api.connectWebSocket();
     }
 
     async initFirebaseAuth() {
@@ -515,9 +528,7 @@ class RiskismApp {
 
     // ─── Agent Trigger ───────────────────────────
     bindAgentButton() {
-        document.getElementById('btn-run-agent')?.addEventListener('click', () => this.runAgent('morning'));
         document.getElementById('btn-run-agent-dash')?.addEventListener('click', () => this.runAgent('morning'));
-        document.getElementById('btn-run-reflection')?.addEventListener('click', () => this.runAgent('afternoon'));
     }
 
     async runAgent(type = 'morning') {
@@ -546,11 +557,13 @@ class RiskismApp {
     }
 
     applyAgentResult(r) {
+        const insight = r.insight || r.afternoon_insight;
+
         // Dashboard: Update core metrics + sparklines
         if (r.portfolio_risk) {
             UI.updateMetrics(r.portfolio_risk, r.metrics_history);
         }
-        if (r.insight) UI.renderAI(r.insight);
+        if (insight) UI.renderAI(insight);
         if (r.anomalies && r.anomalies.length) {
             UI.toast(`⚡ ${r.anomalies.length} anomalies detected`, 'info');
             UI.pushNotifications(r.anomalies);
@@ -571,7 +584,7 @@ class RiskismApp {
         );
 
         // Reports
-        if (r.insight) UI.renderReport(r.insight);
+        if (insight) UI.renderReport(insight);
         if (r.reflection) {
             UI.renderReflection(r.reflection);
             UI.renderPredictionTimeline(r.reflection);
@@ -834,7 +847,13 @@ class RiskismApp {
                 }
 
                 saveSucceeded = true;
-                UI.toast('Portfolio updated successfully', 'success');
+                const queued = Boolean(res?.automation?.queued);
+                UI.toast(
+                    queued
+                ? 'Portfolio đã lưu. AI report và reflection sẽ tự làm mới trong nền.'
+                        : 'Portfolio đã lưu thành công.',
+                    'success'
+                );
                 modal.classList.remove('active');
 
                 const port = await this._fetchWithTimeout(
@@ -857,7 +876,7 @@ class RiskismApp {
                     UI.toast('Server error while saving portfolio', 'error');
                 }
             } finally {
-                btnSave.textContent = 'Save Portfolio & Reload';
+                btnSave.textContent = 'Save Portfolio';
                 btnSave.disabled = false;
             }
         });
@@ -884,9 +903,16 @@ class RiskismApp {
         const hasHoldings = holdings.length > 0;
         const fallbackMetrics = {
             var_95: 0,
+            cvar_95: 0,
+            adjusted_var_95: 0,
+            adjusted_cvar_95: 0,
             sharpe_ratio: 0,
             max_drawdown: 0,
             beta: 0,
+            beta_dimson: 0,
+            liquidity_profile: { effective_horizon_days: 3, locked_capital_pct: 0, worst_symbol: null, positions: [] },
+            tail_risk_contributors: [],
+            stress_scenarios_detail: [],
         };
         const flatHistory = {
             var_95: [0, 0],
@@ -911,6 +937,42 @@ class RiskismApp {
         UI.renderPortfolio(port);
         UI.setNotifications(anomalies);
         this.refreshNewsForCurrentPortfolio();
+    }
+
+    async loadLatestAgentArtifacts() {
+        if (!this.isAuthenticated()) return;
+
+        try {
+            const [insightPayload, predictionPayload, statusPayload] = await Promise.all([
+                this._fetchWithTimeout(api.getInsights(this.userId), this.API_TIMEOUT),
+                this._fetchWithTimeout(api.getPredictions(this.userId), this.API_TIMEOUT),
+                this._fetchWithTimeout(api.getAgentStatus(this.userId), this.API_TIMEOUT),
+            ]);
+
+            const latestInsight =
+                statusPayload?.last_run?.insight ||
+                statusPayload?.last_run?.afternoon_insight ||
+                insightPayload?.insight;
+            const latestReflection =
+                statusPayload?.last_run?.reflection ||
+                predictionPayload?.reflection;
+
+            if (latestInsight) {
+                UI.renderAI(latestInsight);
+                UI.renderReport(latestInsight);
+            }
+
+            if (latestReflection) {
+                UI.renderReflection(latestReflection);
+                UI.renderPredictionTimeline(latestReflection);
+            }
+
+            if (statusPayload?.execution_log?.length) {
+                UI.renderAgentLog(statusPayload.execution_log);
+            }
+        } catch (e) {
+            console.warn('[Dashboard] Agent artifact load failed:', e.message);
+        }
     }
 
     // ─── Data Loaders ────────────────────────────
@@ -942,6 +1004,7 @@ class RiskismApp {
             if (port) {
                 this.applyPortfolioSnapshot(port);
             }
+            await this.loadLatestAgentArtifacts();
         } catch (e) {
             console.warn('[Dashboard] Portfolio load failed:', e.message);
         } finally {

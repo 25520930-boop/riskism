@@ -18,6 +18,7 @@ class RiskMetrics:
     cvar_95: float         # Conditional VaR (95%)
     cvar_99: float         # Conditional VaR (99%)
     beta: float            # Beta vs VN-Index
+    beta_dimson: float     # Dimson beta with lag/lead benchmark adjustment
     sharpe_ratio: float    # Sharpe Ratio
     sortino_ratio: float   # Sortino Ratio
     calmar_ratio: float    # Calmar Ratio (annualized return / max drawdown)
@@ -37,6 +38,7 @@ class RiskMetrics:
             'cvar_95': round(self.cvar_95, 4),
             'cvar_99': round(self.cvar_99, 4),
             'beta': round(self.beta, 4),
+            'beta_dimson': round(self.beta_dimson, 4),
             'sharpe_ratio': round(self.sharpe_ratio, 4),
             'sortino_ratio': round(self.sortino_ratio, 4),
             'calmar_ratio': round(self.calmar_ratio, 4),
@@ -111,6 +113,54 @@ def calculate_beta(stock_returns: np.ndarray, market_returns: np.ndarray) -> flo
 
     covariance = float(np.mean(s_centered * m_centered))
     return float(covariance / market_variance)
+
+
+def calculate_beta_dimson(
+    stock_returns: np.ndarray,
+    market_returns: np.ndarray,
+    lead_lag: int = 1,
+) -> float:
+    """
+    Dimson beta sums lagged/current/lead benchmark coefficients.
+    This better captures beta when price adjustment is delayed.
+    """
+    if lead_lag < 1:
+        return calculate_beta(stock_returns, market_returns)
+
+    min_len = min(len(stock_returns), len(market_returns))
+    s = np.asarray(stock_returns[-min_len:], dtype=float)
+    m = np.asarray(market_returns[-min_len:], dtype=float)
+    finite_mask = np.isfinite(s) & np.isfinite(m)
+    s = s[finite_mask]
+    m = m[finite_mask]
+
+    if len(s) < (lead_lag * 2 + 3):
+        return calculate_beta(s, m)
+
+    y = s[lead_lag: len(s) - lead_lag]
+    if len(y) < 3:
+        return calculate_beta(s, m)
+
+    x_cols = []
+    for lag in range(-lead_lag, lead_lag + 1):
+        start = lead_lag + lag
+        end = len(m) - lead_lag + lag
+        x_cols.append(m[start:end])
+
+    x = np.column_stack(x_cols)
+    finite_mask = np.isfinite(y) & np.all(np.isfinite(x), axis=1)
+    y = y[finite_mask]
+    x = x[finite_mask]
+
+    if len(y) < x.shape[1] + 1:
+        return calculate_beta(s, m)
+
+    design = np.column_stack([np.ones(len(y)), x])
+    try:
+        coefficients, *_ = np.linalg.lstsq(design, y, rcond=None)
+        return float(np.sum(coefficients[1:]))
+    except np.linalg.LinAlgError:
+        return calculate_beta(s, m)
 
 
 def calculate_sharpe_ratio(returns: np.ndarray, risk_free_rate: float = 0.035) -> float:
@@ -232,6 +282,282 @@ def calculate_volatility(returns: np.ndarray) -> Tuple[float, float]:
     daily_vol = float(np.std(returns))
     annual_vol = daily_vol * np.sqrt(252)
     return annual_vol, daily_vol
+
+
+def _resolve_holding_market_value(
+    holding: Dict,
+    market_data: Dict,
+) -> float:
+    """Best-effort market value using the same price scale as market_data."""
+    symbol = holding.get('symbol')
+    quantity = float(holding.get('quantity', 0) or 0)
+    if not symbol or quantity <= 0:
+        return 0.0
+
+    data = market_data.get(symbol, {}) or {}
+    closes = np.asarray(data.get('close', []), dtype=float)
+    if len(closes) > 0 and np.isfinite(closes[-1]) and closes[-1] > 0:
+        return float(quantity * closes[-1])
+
+    for field in ('latest_price', 'avg_price'):
+        raw = holding.get(field)
+        try:
+            price = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(price) and price > 0:
+            return float(quantity * price)
+
+    return 0.0
+
+
+def estimate_t2_liquidity_profile(
+    holdings: List[Dict],
+    market_data: Dict,
+    safe_adv_share: float = 0.2,
+    min_horizon_days: float = 3.0,
+    max_horizon_days: float = 10.0,
+) -> Dict:
+    """
+    Approximate Vietnam T+2 exit risk using a safe-share-of-ADV liquidation model.
+
+    The profile answers:
+    - how many days the portfolio effectively needs to unwind,
+    - which position is the main liquidity bottleneck,
+    - how much capital is still hard to rotate inside a T+2 window.
+    """
+    default_profile = {
+        'multiplier': float(np.sqrt(min_horizon_days)),
+        'effective_horizon_days': float(min_horizon_days),
+        'safe_adv_share': float(safe_adv_share),
+        'locked_capital_pct': 0.0,
+        'worst_symbol': None,
+        'positions': [],
+    }
+    if not holdings:
+        return default_profile
+
+    raw_positions = []
+    total_value = 0.0
+
+    for holding in holdings:
+        symbol = str(holding.get('symbol', '')).strip().upper()
+        position_value = _resolve_holding_market_value(holding, market_data)
+        if not symbol or position_value <= 0:
+            continue
+
+        data = market_data.get(symbol, {}) or {}
+        closes = np.asarray(data.get('close', []), dtype=float)
+        volumes = np.asarray(data.get('volume', []), dtype=float)
+        min_len = min(len(closes), len(volumes))
+
+        avg_daily_traded_value = 0.0
+        participation_rate = 0.0
+        liquidation_days = 1.0
+        locked_fraction = 0.0
+
+        if min_len > 0:
+            traded_value = closes[-min_len:] * volumes[-min_len:]
+            traded_value = traded_value[np.isfinite(traded_value) & (traded_value > 0)]
+            if len(traded_value) > 0:
+                avg_daily_traded_value = float(np.mean(traded_value[-20:]))
+                if avg_daily_traded_value > 0:
+                    safe_daily_liquidity = max(avg_daily_traded_value * safe_adv_share, 1.0)
+                    participation_rate = float(position_value / avg_daily_traded_value)
+                    liquidation_days = max(1.0, position_value / safe_daily_liquidity)
+                    liquidatable_in_t2 = min(1.0, (safe_daily_liquidity * 2.0) / position_value)
+                    locked_fraction = max(0.0, 1.0 - liquidatable_in_t2)
+
+        effective_horizon_days = float(
+            min(max_horizon_days, max(min_horizon_days, 2.0 + liquidation_days))
+        )
+        multiplier = float(np.sqrt(effective_horizon_days))
+        liquidity_penalty = float(multiplier / np.sqrt(min_horizon_days))
+
+        raw_positions.append({
+            'symbol': symbol,
+            'position_value': float(position_value),
+            'avg_daily_traded_value': float(avg_daily_traded_value),
+            'participation_rate': float(participation_rate),
+            'liquidation_days': float(liquidation_days),
+            'effective_horizon_days': float(effective_horizon_days),
+            'locked_fraction': float(locked_fraction),
+            'liquidity_penalty': float(liquidity_penalty),
+        })
+        total_value += position_value
+
+    if total_value <= 0 or not raw_positions:
+        return default_profile
+
+    weighted_multiplier = 0.0
+    weighted_horizon_days = 0.0
+    weighted_locked_fraction = 0.0
+    enriched_positions = []
+
+    for position in raw_positions:
+        weight = float(position['position_value'] / total_value)
+        weighted_multiplier += weight * position['effective_horizon_days'] ** 0.5
+        weighted_horizon_days += weight * position['effective_horizon_days']
+        weighted_locked_fraction += weight * position['locked_fraction']
+        enriched = {
+            **position,
+            'weight': round(weight, 4),
+            'avg_daily_traded_value': round(position['avg_daily_traded_value'], 2),
+            'participation_rate': round(position['participation_rate'], 4),
+            'liquidation_days': round(position['liquidation_days'], 2),
+            'effective_horizon_days': round(position['effective_horizon_days'], 2),
+            'locked_fraction': round(position['locked_fraction'], 4),
+            'liquidity_penalty': round(position['liquidity_penalty'], 4),
+        }
+        enriched_positions.append(enriched)
+
+    enriched_positions.sort(
+        key=lambda item: (item['locked_fraction'], item['liquidity_penalty'], item['weight']),
+        reverse=True,
+    )
+
+    return {
+        'multiplier': float(weighted_multiplier),
+        'effective_horizon_days': round(float(weighted_horizon_days), 2),
+        'safe_adv_share': float(safe_adv_share),
+        'locked_capital_pct': round(float(weighted_locked_fraction), 4),
+        'worst_symbol': enriched_positions[0]['symbol'] if enriched_positions else None,
+        'positions': enriched_positions[:5],
+    }
+
+
+def estimate_t2_liquidity_multiplier(
+    holdings: List[Dict],
+    market_data: Dict,
+) -> float:
+    """Backward-compatible multiplier wrapper for the richer T+2 profile."""
+    return float(estimate_t2_liquidity_profile(holdings, market_data)['multiplier'])
+
+
+def calculate_historical_stress_scenarios(returns: np.ndarray) -> Dict[str, float]:
+    """Worst historical log-return windows as a lightweight stress proxy."""
+    returns = np.asarray(returns, dtype=float)
+    finite_returns = returns[np.isfinite(returns)]
+    if len(finite_returns) == 0:
+        return {}
+
+    scenarios = {}
+    for horizon in (1, 3, 5):
+        if len(finite_returns) < horizon:
+            continue
+        rolling = np.convolve(finite_returns, np.ones(horizon), mode='valid')
+        scenarios[f'worst_{horizon}d'] = float(np.min(rolling))
+    return scenarios
+
+
+def calculate_historical_stress_details(
+    returns: np.ndarray,
+    return_dates: Optional[List[str]] = None,
+) -> List[Dict]:
+    """Describe the worst historical rolling windows with dates when available."""
+    series = np.asarray(returns, dtype=float)
+    if len(series) == 0:
+        return []
+
+    use_dates = return_dates if return_dates and len(return_dates) == len(series) else None
+    details = []
+    for horizon in (1, 3, 5):
+        if len(series) < horizon:
+            continue
+        rolling = np.convolve(series, np.ones(horizon), mode='valid')
+        idx = int(np.argmin(rolling))
+        item = {
+            'label': f'Worst {horizon}D',
+            'horizon_days': horizon,
+            'return': float(rolling[idx]),
+        }
+        if use_dates:
+            item['start_date'] = use_dates[idx]
+            item['end_date'] = use_dates[idx + horizon - 1]
+        details.append(item)
+
+    details.sort(key=lambda item: item['return'])
+    return details
+
+
+def calculate_tail_risk_contributors(
+    holdings: List[Dict],
+    stock_metrics: Dict[str, Dict],
+    market_data: Dict,
+    liquidity_profile: Optional[Dict] = None,
+) -> List[Dict]:
+    """Rank holdings by a blended tail-risk load: CVaR x weight x liquidity x drawdown."""
+    if not holdings or not stock_metrics:
+        return []
+
+    liquidity_profile = liquidity_profile or {}
+    liquidity_by_symbol = {
+        item.get('symbol'): item
+        for item in liquidity_profile.get('positions', [])
+        if item.get('symbol')
+    }
+
+    raw_items = []
+    total_value = 0.0
+    for holding in holdings:
+        position_value = _resolve_holding_market_value(holding, market_data)
+        if position_value <= 0:
+            continue
+        total_value += position_value
+        raw_items.append((holding, position_value))
+
+    if total_value <= 0:
+        return []
+
+    contributions = []
+    total_tail_load = 0.0
+
+    for holding, position_value in raw_items:
+        symbol = str(holding.get('symbol', '')).strip().upper()
+        metrics = stock_metrics.get(symbol) or {}
+        tail_loss = abs(float(metrics.get('cvar_95', metrics.get('var_95', 0.0)) or 0.0))
+        max_dd = abs(float(metrics.get('max_drawdown', 0.0) or 0.0))
+        beta_dimson = abs(float(metrics.get('beta_dimson', metrics.get('beta', 1.0)) or 1.0))
+        liquidity_item = liquidity_by_symbol.get(symbol, {})
+        liquidity_penalty = float(liquidity_item.get('liquidity_penalty', 1.0) or 1.0)
+        weight = float(position_value / total_value)
+
+        beta_penalty = 1.0 + max(beta_dimson - 1.0, 0.0) * 0.25
+        drawdown_penalty = 1.0 + min(max_dd, 1.0)
+        tail_load = weight * tail_loss * liquidity_penalty * beta_penalty * drawdown_penalty
+        total_tail_load += tail_load
+
+        if liquidity_penalty > 1.15:
+            driver = 'liquidity'
+        elif weight > 0.35:
+            driver = 'concentration'
+        elif max_dd > 0.25:
+            driver = 'drawdown'
+        elif beta_dimson > 1.2:
+            driver = 'beta'
+        else:
+            driver = 'tail'
+
+        contributions.append({
+            'symbol': symbol,
+            'weight': round(weight, 4),
+            'cvar_95': round(float(metrics.get('cvar_95', 0.0) or 0.0), 4),
+            'max_drawdown': round(max_dd, 4),
+            'beta_dimson': round(beta_dimson, 4),
+            'liquidity_penalty': round(liquidity_penalty, 4),
+            'tail_load': float(tail_load),
+            'driver': driver,
+        })
+
+    if total_tail_load <= 0:
+        return []
+
+    for item in contributions:
+        item['contribution_pct'] = round(float(item['tail_load'] / total_tail_load), 4)
+        item['tail_load'] = round(item['tail_load'], 6)
+
+    contributions.sort(key=lambda item: item['contribution_pct'], reverse=True)
+    return contributions[:5]
 
 
 def _prepare_price_series(data: Dict) -> Tuple[List[str], Dict[str, float]]:
@@ -391,6 +717,7 @@ def compute_all_metrics(
     cvar_95 = calculate_cvar(returns, 0.95)
     cvar_99 = calculate_cvar(returns, 0.99)
     beta = calculate_beta(returns, market_returns) if len(market_returns) > 0 else 1.0
+    beta_dimson = calculate_beta_dimson(returns, market_returns) if len(market_returns) > 0 else beta
     sharpe = calculate_sharpe_ratio(returns, risk_free_rate)
     sortino = calculate_sortino_ratio(returns, risk_free_rate)
     max_dd, dd_duration = calculate_max_drawdown(prices)
@@ -416,6 +743,7 @@ def compute_all_metrics(
         cvar_95=cvar_95,
         cvar_99=cvar_99,
         beta=beta,
+        beta_dimson=beta_dimson,
         sharpe_ratio=sharpe,
         sortino_ratio=sortino,
         calmar_ratio=calmar,
@@ -522,9 +850,26 @@ def compute_portfolio_risk_summary(
     
     current_risk = {
         'var_95': 0,
+        'cvar_95': 0,
+        'cvar_99': 0,
+        'adjusted_var_95': 0,
+        'adjusted_cvar_95': 0,
         'sharpe_ratio': 0,
         'max_drawdown': 0,
-        'beta': 1.0
+        'beta': 1.0,
+        'beta_dimson': 1.0,
+        'liquidity_multiplier': float(np.sqrt(3.0)),
+        'liquidity_profile': {
+            'multiplier': float(np.sqrt(3.0)),
+            'effective_horizon_days': 3.0,
+            'safe_adv_share': 0.2,
+            'locked_capital_pct': 0.0,
+            'worst_symbol': None,
+            'positions': [],
+        },
+        'stress_scenarios': {},
+        'stress_scenarios_detail': [],
+        'tail_risk_contributors': [],
     }
     metrics_history = {}
     stock_metrics = {}
@@ -554,9 +899,28 @@ def compute_portfolio_risk_summary(
         return {'current_risk': current_risk, 'metrics_history': metrics_history, 'stock_metrics': stock_metrics}
 
     current_risk['var_95'] = float(calculate_var(portfolio_returns, 0.95))
+    current_risk['cvar_95'] = float(calculate_cvar(portfolio_returns, 0.95))
+    current_risk['cvar_99'] = float(calculate_cvar(portfolio_returns, 0.99))
     current_risk['sharpe_ratio'] = float(calculate_sharpe_ratio(portfolio_returns))
     dd, _ = calculate_max_drawdown(portfolio_prices)
     current_risk['max_drawdown'] = float(dd)
+    liquidity_profile = estimate_t2_liquidity_profile(holdings, market_data)
+    liquidity_multiplier = float(liquidity_profile.get('multiplier', np.sqrt(3.0)))
+    current_risk['liquidity_multiplier'] = float(liquidity_multiplier)
+    current_risk['liquidity_profile'] = liquidity_profile
+    current_risk['adjusted_var_95'] = float(current_risk['var_95'] * liquidity_multiplier)
+    current_risk['adjusted_cvar_95'] = float(current_risk['cvar_95'] * liquidity_multiplier)
+    current_risk['stress_scenarios'] = calculate_historical_stress_scenarios(portfolio_returns)
+    current_risk['stress_scenarios_detail'] = calculate_historical_stress_details(
+        portfolio_returns,
+        portfolio_dates[1:],
+    )
+    current_risk['tail_risk_contributors'] = calculate_tail_risk_contributors(
+        holdings,
+        stock_metrics,
+        market_data,
+        liquidity_profile=liquidity_profile,
+    )
 
     aligned_market_prices = None
     if vnindex_data:
@@ -572,6 +936,7 @@ def compute_portfolio_risk_summary(
                 aligned_portfolio_returns = calculate_returns(aligned_portfolio_prices)
                 if len(aligned_portfolio_returns) > 1 and len(market_returns) > 1:
                     current_risk['beta'] = float(calculate_beta(aligned_portfolio_returns, market_returns))
+                    current_risk['beta_dimson'] = float(calculate_beta_dimson(aligned_portfolio_returns, market_returns))
 
     # Rolling history for sparklines (need enough data points)
     if len(portfolio_prices) > 25:

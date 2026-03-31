@@ -20,7 +20,7 @@ from backend.risk_engine import (
     compute_all_metrics, compute_portfolio_metrics,
     generate_capital_advice, scan_all_anomalies,
     calculate_returns, SECTOR_MAP,
-    compute_portfolio_risk_summary,
+    compute_portfolio_risk_summary, build_sector_benchmark_exposure,
 )
 
 
@@ -142,7 +142,16 @@ class AgentOrchestrator:
                 'risk_appetite': user_result[0],
                 'capital_amount': float(user_result[1]),
                 'holdings': [
-                    {'symbol': r[0], 'quantity': r[1], 'avg_price': float(r[2]), 'sector': r[3] or 'Unknown'}
+                    {
+                        'symbol': r[0],
+                        'quantity': r[1],
+                        'avg_price': float(r[2]),
+                        'sector': (
+                            str(r[3]).strip()
+                            if r[3] and str(r[3]).strip() and str(r[3]).strip() != 'Unknown'
+                            else SECTOR_MAP.get(r[0], 'Unknown')
+                        )
+                    }
                     for r in holdings_result
                 ]
             }
@@ -256,12 +265,53 @@ class AgentOrchestrator:
         self.log('ANALYSIS', f'Found {len(all_anomalies)} anomalies')
         return all_anomalies
 
-    async def tool_save_insight(self, insight: Dict) -> Dict:
+    def _normalize_insight_type(self, insight: Dict) -> str:
+        allowed = {'risk_alert', 'daily_report', 'anomaly', 'morning_brief', 'afternoon_review'}
+        raw = str(insight.get('insight_type') or '').strip().lower()
+        if raw in allowed:
+            return raw
+
+        title = str(insight.get('title') or '').lower()
+        if 'afternoon' in title or 'chiều' in title:
+            return 'afternoon_review'
+        if insight.get('risk_level') == 'critical':
+            return 'risk_alert'
+        return 'daily_report'
+
+    def _save_insight_sync(self, user_id: int, insight: Dict):
+        from backend.database import SyncSessionLocal
+        from sqlalchemy import text
+        db = None
+        try:
+            db = SyncSessionLocal()
+            db.execute(
+                text(
+                    "INSERT INTO insights (user_id, insight_type, title, content, risk_level, confidence_score) "
+                    "VALUES (:uid, :itype, :title, :content, :risk_level, :confidence)"
+                ),
+                {
+                    "uid": user_id,
+                    "itype": self._normalize_insight_type(insight),
+                    "title": str(insight.get('title') or 'AI Insight')[:200],
+                    "content": json.dumps(insight, ensure_ascii=False),
+                    "risk_level": str(insight.get('risk_level') or 'medium'),
+                    "confidence": float(insight.get('confidence_score') or 0),
+                }
+            )
+            db.commit()
+        except Exception as e:
+            print(f"[Agent] DB Error in _save_insight_sync: {e}")
+        finally:
+            if db:
+                db.close()
+
+    async def tool_save_insight(self, insight: Dict, user_id: int = 1) -> Dict:
         """Tool 8: Save generated insight."""
         self.log('INSIGHT', f'Saving insight: {insight.get("title", "Untitled")}')
         insight['saved_at'] = datetime.now().isoformat()
         insight['agent_session'] = len(self.execution_log)
         self.state['latest_insight'] = insight
+        await self._run_sync(self._save_insight_sync, user_id, insight)
         return insight
 
     def _save_morning_prediction_sync(self, prediction: Dict, user_id: int) -> Optional[int]:
@@ -431,7 +481,23 @@ class AgentOrchestrator:
             if len(vnindex_prices) > 1:
                 vnindex_returns = calculate_returns(vnindex_prices)
 
-        portfolio_metrics = await self._run_sync(compute_portfolio_metrics, portfolio['holdings'], returns_dict, vnindex_returns)
+        vn30_returns = None
+        if 'VN30' in market_data:
+            vn30_prices = np.array(market_data['VN30'].get('close', []))
+            if len(vn30_prices) > 1:
+                vn30_returns = calculate_returns(vn30_prices)
+
+        vn30_symbols = await self.vnstock.get_vn30_constituents_async()
+        vn30_sector_exposure = await self._run_sync(build_sector_benchmark_exposure, vn30_symbols)
+
+        portfolio_metrics = await self._run_sync(
+            compute_portfolio_metrics,
+            portfolio['holdings'],
+            returns_dict,
+            vnindex_returns,
+            vn30_returns,
+            vn30_sector_exposure,
+        )
         capital_advice = await self._run_sync(generate_capital_advice, portfolio['capital_amount'], portfolio['holdings'], returns_dict)
         risk_summary = await self._run_sync(compute_portfolio_risk_summary, portfolio['holdings'], returns_dict, market_data)
 
@@ -466,7 +532,7 @@ class AgentOrchestrator:
         insight, prediction = await asyncio.gather(insight_task, prediction_task)
 
         # === INSIGHT PHASE ===
-        saved_insight = await self.tool_save_insight(insight)
+        saved_insight = await self.tool_save_insight(insight, user_id)
         saved_prediction = await self.tool_save_morning_prediction(prediction, user_id)
 
         elapsed = time.time() - start_time
@@ -525,7 +591,7 @@ class AgentOrchestrator:
             })
 
             afternoon_insight['insight_type'] = 'afternoon_review'
-            await self.tool_save_insight(afternoon_insight)
+            await self.tool_save_insight(afternoon_insight, user_id)
 
             elapsed = time.time() - start_time
             self.log('COMPLETE', f'✅ Afternoon review completed in {elapsed:.1f}s')

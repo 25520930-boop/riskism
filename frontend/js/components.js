@@ -131,6 +131,55 @@ const UI = {
         return this._toFiniteNumber(value, fallback).toFixed(digits);
     },
 
+    _formatShortDate(value) {
+        if (!value) return '';
+        const raw = String(value).slice(0, 10);
+        if (raw.length !== 10) return raw;
+        const [year, month, day] = raw.split('-');
+        return `${day}/${month}`;
+    },
+
+    _summarizeSectorGap(gapMap) {
+        const entries = Object.entries(gapMap || {})
+            .filter(([sector, value]) => sector !== 'Unknown' && Math.abs(this._toFiniteNumber(value, 0)) >= 0.01)
+            .sort((a, b) => Math.abs(this._toFiniteNumber(b[1], 0)) - Math.abs(this._toFiniteNumber(a[1], 0)));
+
+        if (!entries.length) {
+            return 'Aligned';
+        }
+
+        const [sector, value] = entries[0];
+        const pct = this._toFiniteNumber(value, 0) * 100;
+        return `${sector} ${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%`;
+    },
+
+    _summarizeTailRisk(contributors) {
+        const top = (contributors || []).slice(0, 2);
+        if (!top.length) return 'Tail risk đang phân tán đều.';
+        return top.map(item =>
+            `${item.symbol} ${(this._toFiniteNumber(item.contribution_pct, 0) * 100).toFixed(0)}%`
+        ).join(' · ');
+    },
+
+    _summarizeStressScenario(details) {
+        const worst = (details || [])[0];
+        if (!worst) return 'Chưa đủ lịch sử để dựng stress window.';
+        const start = this._formatShortDate(worst.start_date);
+        const end = this._formatShortDate(worst.end_date);
+        const windowLabel = start && end ? ` (${start} → ${end})` : '';
+        return `${worst.label} ${this._formatLossPercent(worst.return, 1)}${windowLabel}`;
+    },
+
+    _summarizeLiquidityProfile(profile) {
+        if (!profile || profile.effective_horizon_days == null) {
+            return 'T+2 profile chưa sẵn sàng.';
+        }
+        const days = this._formatDecimal(profile.effective_horizon_days, 1);
+        const locked = (this._toFiniteNumber(profile.locked_capital_pct, 0) * 100).toFixed(0);
+        const bottleneck = profile.worst_symbol || '—';
+        return `Horizon ~${days} ngày | bottleneck ${bottleneck} | locked ~${locked}%`;
+    },
+
     _getBetaDescriptor(value) {
         const beta = this._toFiniteNumber(value, 0);
         if (beta < -0.2) return { label: 'Hedge', className: 'defensive' };
@@ -386,7 +435,7 @@ const UI = {
     // ─── Portfolio Tab ───────────────────────────
     renderPortfolio(data) {
         if (!data) return;
-        const { portfolio, portfolio_metrics, capital_advice, stock_risks } = data;
+        const { portfolio, portfolio_metrics, capital_advice, stock_risks, portfolio_risk } = data;
         const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
         const holdings = portfolio?.holdings || [];
 
@@ -419,6 +468,15 @@ const UI = {
         set('pf-maxpos', capital_advice.max_positions || 3);
         set('pf-div', (portfolio_metrics.diversification_score || 0) + '/100');
         set('pf-hhi', (portfolio_metrics.hhi || 0).toFixed(2));
+        set('pf-adjvar', this._formatLossPercent(portfolio_risk?.adjusted_var_95, 1));
+        set('pf-cvar', this._formatLossPercent(portfolio_risk?.cvar_95, 1));
+        set(
+            'pf-vn30corr',
+            portfolio_metrics?.rolling_correlation_vn30 != null
+                ? this._formatDecimal(portfolio_metrics.rolling_correlation_vn30, 2)
+                : '—'
+        );
+        set('pf-gap', this._summarizeSectorGap(portfolio_metrics?.sector_gap_vs_vn30));
 
         // Render Performance Chart
         this.renderPortfolioPerformanceChart(totalValue, totalPnlPct);
@@ -428,7 +486,16 @@ const UI = {
         if (sectorEl && holdings.length === 0) {
             sectorEl.innerHTML = '<div class="empty-msg">Chua co co phieu nao de phan bo nganh.</div>';
         } else if (sectorEl && portfolio_metrics.sector_exposure) {
-            const colors = { Banking: '#2563EB', Technology: '#7C3AED', Industrial: '#F59E0B', 'Real Estate': '#EC4899', Consumer: '#10B981', Energy: '#F97316' };
+            const colors = {
+                Banking: '#2563EB',
+                Technology: '#7C3AED',
+                Industrial: '#F59E0B',
+                'Real Estate': '#EC4899',
+                Consumer: '#10B981',
+                Energy: '#F97316',
+                Logistics: '#0891B2',
+                'Financial Services': '#DC2626',
+            };
             sectorEl.innerHTML = Object.entries(portfolio_metrics.sector_exposure).map(([name, pct]) =>
                 `<div class="sector-row">
                     <span class="sector-name">${name}</span>
@@ -460,6 +527,15 @@ const UI = {
                 if (capital_advice.suggested_next_symbols && capital_advice.suggested_next_symbols.length) {
                     html += `<div class="advice-info">💡 Gợi ý đa dạng hóa: <strong>${capital_advice.suggested_next_symbols.join(', ')}</strong></div>`;
                 }
+                if (portfolio_risk?.liquidity_profile) {
+                    html += `<div class="advice-info">⏳ Adj VaR T+2: <strong>${this._summarizeLiquidityProfile(portfolio_risk.liquidity_profile)}</strong></div>`;
+                }
+                if (portfolio_risk?.tail_risk_contributors?.length) {
+                    html += `<div class="advice-info">🧨 Tail risk chính: <strong>${this._summarizeTailRisk(portfolio_risk.tail_risk_contributors)}</strong></div>`;
+                }
+                if (portfolio_risk?.stress_scenarios_detail?.length) {
+                    html += `<div class="advice-info">📉 Stress window xấu nhất: <strong>${this._summarizeStressScenario(portfolio_risk.stress_scenarios_detail)}</strong></div>`;
+                }
                 html += `<div class="advice-info">🎯 Position size: ~${capital_advice.position_size_pct}% per stock (max ${capital_advice.max_positions} positions)</div>`;
                 advEl.innerHTML = html;
             }
@@ -489,7 +565,7 @@ const UI = {
                     <td class="text-right"><span class="risk-pill ${rcls}">${rs}</span></td>
                     <td class="text-right mono">${this._formatLossPercent(r.var_95, 2)}</td>
                     <td class="text-right mono">${this._formatDecimal(r.sharpe_ratio, 2)}</td>
-                    <td class="text-right mono">${this._formatDecimal(r.beta, 2)}</td>
+                    <td class="text-right mono">${this._formatDecimal(r.beta_dimson ?? r.beta, 2)}</td>
                 </tr>`;
             }).join('');
         }
@@ -879,6 +955,7 @@ const UI = {
             ['Sharpe', this._formatDecimal(m.sharpe_ratio, 2)],
             ['Sortino', this._formatDecimal(m.sortino_ratio, 2)],
             ['Beta', this._formatDecimal(m.beta, 2)],
+            ['Beta Dimson', this._formatDecimal(m.beta_dimson ?? m.beta, 2)],
             ['Max DD', this._formatLossPercent(m.max_drawdown, 1)],
             ['Volatility', (this._toFiniteNumber(m.volatility, 0) * 100).toFixed(1) + '%'],
             ['Risk Score', (m.risk_score || 0) + '/100'],
@@ -946,18 +1023,34 @@ const UI = {
 
     // ─── Prediction Timeline ─────────────────────────
     _predictionHistory: [],
+    _predictionHistoryKeys: new Set(),
 
     renderPredictionTimeline(reflection) {
         if (!reflection) return;
+        const entryKey = String(
+            reflection.evaluated_at ||
+            reflection.predicted_at ||
+            `${reflection.what_was_right || ''}|${reflection.lesson_learned || ''}`
+        );
+        if (this._predictionHistoryKeys.has(entryKey)) {
+            return;
+        }
+
+        const reflectionTime = reflection.evaluated_at
+            ? new Date(reflection.evaluated_at)
+            : new Date();
         const entry = {
-            date: new Date().toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' }),
-            time: new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
+            date: reflectionTime.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' }),
+            time: reflectionTime.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
             accuracy: reflection.accuracy_score || 0,
             prediction: reflection.what_was_right || 'N/A',
             lesson: reflection.lesson_learned || 'N/A',
         };
+        this._predictionHistoryKeys.add(entryKey);
         this._predictionHistory.unshift(entry);
-        if (this._predictionHistory.length > 10) this._predictionHistory.pop();
+        if (this._predictionHistory.length > 10) {
+            this._predictionHistory.pop();
+        }
 
         const body = document.getElementById('timeline-body');
         if (!body) return;
@@ -1013,7 +1106,7 @@ const UI = {
         if (!list) return;
 
         if (!anomalies.length) {
-            list.innerHTML = '<div class="notify-empty">No alerts yet. Run AI Agent to detect anomalies.</div>';
+            list.innerHTML = '<div class="notify-empty">No alerts yet. Hệ thống đang tự quét anomaly trong nền.</div>';
             if (dot) dot.classList.remove('active');
             return;
         }

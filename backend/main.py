@@ -12,7 +12,7 @@ import hashlib
 import secrets
 from collections import defaultdict
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Request
@@ -26,6 +26,7 @@ from backend.config import get_settings
 from backend.agent.orchestrator import AgentOrchestrator
 from backend.data.vnstock_client import VnstockClient
 from backend.firebase_auth import get_firebase_public_config, verify_firebase_id_token
+from backend.risk_engine.capital_aware import SECTOR_MAP
 
 settings = get_settings()
 
@@ -37,6 +38,23 @@ DEMO_USER_PASSWORD_HASH = "pbkdf2_sha256$310000$9c3f4ec51f8ae5ff27b1e978df3f98b0
 # Global instances
 agent = AgentOrchestrator()
 vnstock = VnstockClient()
+agent_execution_lock = asyncio.Lock()
+auto_agent_tasks: Dict[Tuple[int, str], asyncio.Task] = {}
+
+
+def _default_auto_agent_state() -> Dict:
+    return {
+        'running': None,
+        'last_runs': {},
+        'latest_execution_log': [],
+        'latest_result': None,
+    }
+
+
+auto_agent_state = defaultdict(_default_auto_agent_state)
+AGENT_AUTOMATION_COOLDOWN_SECONDS = 90
+AUTO_MORNING_START_MINUTES = 8 * 60 + 30
+AUTO_AFTERNOON_START_MINUTES = 15 * 60 + 30
 
 
 # WebSocket connection manager
@@ -66,9 +84,12 @@ ws_manager = ConnectionManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🚀 Riskism Backend V3.0 starting...")
-    task = asyncio.create_task(price_broadcast_loop())
+    price_task = asyncio.create_task(price_broadcast_loop())
+    automation_task = asyncio.create_task(agent_automation_loop())
     yield
-    task.cancel()
+    price_task.cancel()
+    automation_task.cancel()
+    await asyncio.gather(price_task, automation_task, return_exceptions=True)
     print("👋 Riskism Backend shutting down")
 
 
@@ -172,6 +193,317 @@ async def price_broadcast_loop():
             print(f"[WS] Broadcast error: {e}")
 
         await asyncio.sleep(10)
+
+
+def _coerce_datetime(value) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_json_field(payload):
+    if payload is None:
+        return None
+    if isinstance(payload, dict):
+        return dict(payload)
+    if isinstance(payload, str):
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _load_latest_insight_sync(user_id: int) -> Optional[Dict]:
+    db = None
+    try:
+        db = SyncSessionLocal()
+        row = db.execute(
+            text(
+                "SELECT title, content, risk_level, confidence_score, created_at "
+                "FROM insights WHERE user_id = :uid ORDER BY created_at DESC LIMIT 1"
+            ),
+            {"uid": user_id}
+        ).fetchone()
+        if not row:
+            return None
+
+        insight = _parse_json_field(row[1]) or {}
+        if not insight:
+            insight = {
+                "title": row[0],
+                "summary": row[1],
+                "risk_level": row[2],
+                "confidence_score": float(row[3] or 0),
+            }
+        insight.setdefault("title", row[0] or "AI Insight")
+        insight.setdefault("risk_level", row[2] or "medium")
+        insight.setdefault("confidence_score", float(row[3] or 0))
+        if row[4] and not insight.get("saved_at"):
+            insight["saved_at"] = row[4].isoformat()
+        return insight
+    except Exception as e:
+        print(f"[Agent] Failed to load latest insight for user {user_id}: {e}")
+        return None
+    finally:
+        if db:
+            db.close()
+
+
+def _load_latest_morning_prediction_sync(user_id: int) -> Optional[Dict]:
+    db = None
+    try:
+        db = SyncSessionLocal()
+        row = db.execute(
+            text(
+                "SELECT content, predicted_at FROM morning_predictions "
+                "WHERE user_id = :uid ORDER BY predicted_at DESC LIMIT 1"
+            ),
+            {"uid": user_id}
+        ).fetchone()
+        if not row:
+            return None
+
+        prediction = _parse_json_field(row[0]) or {}
+        if row[1] and not prediction.get("predicted_at"):
+            prediction["predicted_at"] = row[1].isoformat()
+        return prediction
+    except Exception as e:
+        print(f"[Agent] Failed to load latest prediction for user {user_id}: {e}")
+        return None
+    finally:
+        if db:
+            db.close()
+
+
+def _load_latest_reflection_sync(user_id: int) -> Optional[Dict]:
+    db = None
+    try:
+        db = SyncSessionLocal()
+        row = db.execute(
+            text(
+                "SELECT content, evaluated_at FROM reflections "
+                "WHERE user_id = :uid ORDER BY evaluated_at DESC LIMIT 1"
+            ),
+            {"uid": user_id}
+        ).fetchone()
+        if not row:
+            return None
+
+        reflection = _parse_json_field(row[0]) or {}
+        if row[1] and not reflection.get("evaluated_at"):
+            reflection["evaluated_at"] = row[1].isoformat()
+        return reflection
+    except Exception as e:
+        print(f"[Agent] Failed to load latest reflection for user {user_id}: {e}")
+        return None
+    finally:
+        if db:
+            db.close()
+
+
+def _load_latest_agent_dates_sync(user_id: int) -> Dict[str, Optional[str]]:
+    db = None
+    try:
+        db = SyncSessionLocal()
+        morning = db.execute(
+            text("SELECT predicted_at FROM morning_predictions WHERE user_id = :uid ORDER BY predicted_at DESC LIMIT 1"),
+            {"uid": user_id}
+        ).fetchone()
+        reflection = db.execute(
+            text("SELECT evaluated_at FROM reflections WHERE user_id = :uid ORDER BY evaluated_at DESC LIMIT 1"),
+            {"uid": user_id}
+        ).fetchone()
+        return {
+            "morning_date": morning[0].date().isoformat() if morning and morning[0] else None,
+            "reflection_date": reflection[0].date().isoformat() if reflection and reflection[0] else None,
+        }
+    except Exception as e:
+        print(f"[Agent] Failed to load agent dates for user {user_id}: {e}")
+        return {"morning_date": None, "reflection_date": None}
+    finally:
+        if db:
+            db.close()
+
+
+def _list_users_with_holdings_sync() -> List[int]:
+    db = None
+    try:
+        db = SyncSessionLocal()
+        rows = db.execute(
+            text("SELECT DISTINCT user_id FROM portfolios WHERE quantity > 0 ORDER BY user_id")
+        ).fetchall()
+        return [int(row[0]) for row in rows if row and row[0] is not None]
+    except Exception as e:
+        print(f"[Agent] Failed to list users with holdings: {e}")
+        return []
+    finally:
+        if db:
+            db.close()
+
+
+def _user_has_holdings_sync(user_id: int) -> bool:
+    db = None
+    try:
+        db = SyncSessionLocal()
+        row = db.execute(
+            text("SELECT 1 FROM portfolios WHERE user_id = :uid AND quantity > 0 LIMIT 1"),
+            {"uid": user_id}
+        ).fetchone()
+        return bool(row)
+    except Exception as e:
+        print(f"[Agent] Failed to check holdings for user {user_id}: {e}")
+        return False
+    finally:
+        if db:
+            db.close()
+
+
+def _minutes_since_midnight(now: datetime) -> int:
+    return now.hour * 60 + now.minute
+
+
+def _should_skip_agent_run(user_id: int, analysis_type: str, force: bool = False) -> bool:
+    if force:
+        return False
+
+    state = auto_agent_state[user_id]
+    last_run = state['last_runs'].get(analysis_type)
+    completed_at = _coerce_datetime(last_run.get('completed_at')) if isinstance(last_run, dict) else None
+    if not completed_at:
+        return False
+    return (datetime.now() - completed_at).total_seconds() < AGENT_AUTOMATION_COOLDOWN_SECONDS
+
+
+async def _execute_agent_analysis(
+    user_id: int,
+    analysis_type: str,
+    symbol: Optional[str] = None,
+    trigger_source: str = "manual",
+) -> Dict:
+    async with agent_execution_lock:
+        started_at = datetime.now()
+        state = auto_agent_state[user_id]
+        state['running'] = {
+            'analysis_type': analysis_type,
+            'trigger_source': trigger_source,
+            'started_at': started_at.isoformat(),
+        }
+
+        if analysis_type == "morning":
+            result = await agent.run_morning_analysis(user_id)
+        elif analysis_type == "afternoon":
+            result = await agent.run_afternoon_review(user_id)
+        elif analysis_type == "quick" and symbol:
+            result = await agent.run_quick_analysis(symbol.upper())
+        else:
+            state['running'] = None
+            raise HTTPException(status_code=400, detail="Invalid analysis_type")
+
+        completed_at = datetime.now()
+        result = {
+            **result,
+            'analysis_type': analysis_type,
+            'user_id': user_id,
+            'trigger_source': trigger_source,
+            'completed_at': completed_at.isoformat(),
+        }
+        if 'execution_log' not in result:
+            result['execution_log'] = list(agent.execution_log)
+
+        state['latest_execution_log'] = list(result.get('execution_log') or [])
+        state['latest_result'] = result
+        state['last_runs'][analysis_type] = {
+            'status': result.get('status', 'unknown'),
+            'started_at': started_at.isoformat(),
+            'completed_at': completed_at.isoformat(),
+            'trigger_source': trigger_source,
+        }
+        state['running'] = None
+        agent.state['latest_agent_result'] = result
+
+    await ws_manager.broadcast({
+        'type': 'agent_result',
+        'data': result,
+        'timestamp': datetime.now().isoformat(),
+    })
+    return result
+
+
+async def _queue_agent_analysis(
+    user_id: int,
+    analysis_type: str,
+    trigger_source: str,
+    delay_seconds: float = 0,
+    force: bool = False,
+) -> bool:
+    if analysis_type not in {"morning", "afternoon"}:
+        return False
+
+    has_holdings = await asyncio.to_thread(_user_has_holdings_sync, user_id)
+    if not has_holdings:
+        return False
+
+    key = (user_id, analysis_type)
+    existing_task = auto_agent_tasks.get(key)
+    if existing_task and not existing_task.done():
+        return False
+    if _should_skip_agent_run(user_id, analysis_type, force=force):
+        return False
+
+    async def _job():
+        try:
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+            still_has_holdings = await asyncio.to_thread(_user_has_holdings_sync, user_id)
+            if not still_has_holdings:
+                return
+            await _execute_agent_analysis(user_id, analysis_type, trigger_source=trigger_source)
+        except Exception as e:
+            print(f"[Agent] Background {analysis_type} failed for user {user_id}: {e}")
+            auto_agent_state[user_id]['running'] = None
+        finally:
+            auto_agent_tasks.pop(key, None)
+
+    auto_agent_tasks[key] = asyncio.create_task(_job())
+    return True
+
+
+async def agent_automation_loop():
+    """Run morning analysis and afternoon reflection automatically for active portfolios."""
+    while True:
+        try:
+            now = datetime.now()
+            if now.weekday() < 5:
+                minutes = _minutes_since_midnight(now)
+                user_ids = await asyncio.to_thread(_list_users_with_holdings_sync)
+                for user_id in user_ids:
+                    latest_dates = await asyncio.to_thread(_load_latest_agent_dates_sync, user_id)
+                    today = now.date().isoformat()
+
+                    if AUTO_MORNING_START_MINUTES <= minutes < AUTO_AFTERNOON_START_MINUTES:
+                        if latest_dates.get('morning_date') != today:
+                            await _queue_agent_analysis(
+                                user_id,
+                                'morning',
+                                trigger_source='scheduled_morning',
+                            )
+                    elif minutes >= AUTO_AFTERNOON_START_MINUTES:
+                        if latest_dates.get('morning_date') == today and latest_dates.get('reflection_date') != today:
+                            await _queue_agent_analysis(
+                                user_id,
+                                'afternoon',
+                                trigger_source='scheduled_reflection',
+                            )
+        except Exception as e:
+            print(f"[Agent] Automation loop error: {e}")
+
+        await asyncio.sleep(60)
 
 
 # ─── API ROUTES ──────────────────────────────────────────
@@ -772,18 +1104,33 @@ async def update_portfolio(user_id: int, request: PortfolioUpdateRequest):
                         status_code=400,
                         detail=f"Không lấy được giá hiện tại cho mã {symbol}"
                     )
+                sector = SECTOR_MAP.get(symbol, 'Unknown')
                 db.execute(text(
                     "INSERT INTO portfolios (user_id, symbol, quantity, avg_price, sector) "
-                    "VALUES (:uid, :sym, :qty, :prc, 'Unknown')"
+                    "VALUES (:uid, :sym, :qty, :prc, :sector)"
                 ), {
                     "uid": user_id,
                     "sym": symbol,
                     "qty": normalized_holdings[symbol]["quantity"],
-                    "prc": resolved_price
+                    "prc": resolved_price,
+                    "sector": sector,
                 })
         
         db.commit()
-        return {"status": "success"}
+        queued = await _queue_agent_analysis(
+            user_id,
+            'morning',
+            trigger_source='portfolio_update',
+            delay_seconds=1,
+            force=True,
+        )
+        return {
+            "status": "success",
+            "automation": {
+                "queued": queued,
+                "analysis_type": "morning",
+            },
+        }
     except Exception as e:
         db.rollback()
         if isinstance(e, HTTPException):
@@ -799,13 +1146,27 @@ async def update_portfolio(user_id: int, request: PortfolioUpdateRequest):
                     'symbol': h.symbol.upper(),
                     'quantity': h.quantity,
                     'avg_price': float((await _get_stock_reference_snapshot(h.symbol.upper()) or {}).get('price') or 0),
-                    'sector': 'Unknown'
+                    'sector': SECTOR_MAP.get(h.symbol.upper(), 'Unknown')
                 }
                 for h in request.holdings if h.quantity > 0
             ]
         }
         
-        return {"status": "success", "demo_mode": True}
+        queued = await _queue_agent_analysis(
+            user_id,
+            'morning',
+            trigger_source='portfolio_update',
+            delay_seconds=1,
+            force=True,
+        )
+        return {
+            "status": "success",
+            "demo_mode": True,
+            "automation": {
+                "queued": queued,
+                "analysis_type": "morning",
+            },
+        }
     finally:
         db.close()
 
@@ -824,6 +1185,7 @@ async def get_portfolio_risk(user_id: int):
     from backend.risk_engine import (
         compute_portfolio_metrics, generate_capital_advice,
         calculate_returns, compute_portfolio_risk_summary,
+        build_sector_benchmark_exposure,
     )
 
     portfolio = await agent.tool_get_portfolio(user_id)
@@ -878,8 +1240,20 @@ async def get_portfolio_risk(user_id: int):
     if vnindex.get('close'):
         market_returns = calculate_returns(np.array(vnindex['close']))
 
+    benchmark_returns = None
+    vn30 = market_data.get('VN30', {})
+    if vn30.get('close'):
+        benchmark_returns = calculate_returns(np.array(vn30['close']))
+
+    vn30_symbols = await vnstock.get_vn30_constituents_async()
+    vn30_sector_exposure = build_sector_benchmark_exposure(vn30_symbols)
+
     portfolio_metrics = compute_portfolio_metrics(
-        portfolio['holdings'], returns_dict, market_returns
+        portfolio['holdings'],
+        returns_dict,
+        market_returns=market_returns,
+        benchmark_returns=benchmark_returns,
+        benchmark_sector_exposure=vn30_sector_exposure,
     )
     capital_advice = generate_capital_advice(
         portfolio['capital_amount'], portfolio['holdings'], returns_dict,
@@ -937,7 +1311,11 @@ async def get_portfolio_risk(user_id: int):
 # --- Insights ---
 @app.get("/api/insights/{user_id}")
 async def get_latest_insights(user_id: int):
-    insight = agent.state.get('latest_insight', None)
+    state = auto_agent_state[user_id]
+    latest_result = state.get('latest_result') or {}
+    insight = latest_result.get('insight') or latest_result.get('afternoon_insight')
+    if not insight:
+        insight = await asyncio.to_thread(_load_latest_insight_sync, user_id)
     return {
         'insight': insight,
         'generated_at': insight.get('saved_at') if insight else None,
@@ -997,46 +1375,59 @@ async def trigger_agent(request: AgentTriggerRequest, req: Request):
             headers={"Retry-After": str(retry)}
         )
     try:
-        if request.analysis_type == "morning":
-            result = await agent.run_morning_analysis(request.user_id)
-        elif request.analysis_type == "afternoon":
-            result = await agent.run_afternoon_review(request.user_id)
-        elif request.analysis_type == "quick" and request.symbol:
-            result = await agent.run_quick_analysis(request.symbol.upper())
-        else:
-            raise HTTPException(status_code=400, detail="Invalid analysis_type")
-
-        # Broadcast via WebSocket
-        await ws_manager.broadcast({
-            'type': 'agent_result',
-            'data': result,
-            'timestamp': datetime.now().isoformat(),
-        })
-
+        result = await _execute_agent_analysis(
+            request.user_id,
+            request.analysis_type,
+            symbol=request.symbol,
+            trigger_source='manual',
+        )
         return result
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Agent analysis timed out")
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[Agent] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/agent/status")
-async def get_agent_status():
+async def get_agent_status(user_id: int = Query(default=1)):
+    state = auto_agent_state[user_id]
     return {
-        'status': 'ready',
-        'last_run': agent.execution_log[-1] if agent.execution_log else None,
-        'total_runs': len(agent.execution_log),
+        'status': 'running' if state.get('running') else 'ready',
+        'last_run': state.get('latest_result'),
+        'total_runs': len(state.get('last_runs', {})),
         'state_keys': list(agent.state.keys()),
+        'execution_log': state.get('latest_execution_log', []),
+        'automation': {
+            'running': state.get('running'),
+            'last_runs': state.get('last_runs', {}),
+        },
     }
 
 
 # --- Predictions ---
 @app.get("/api/predictions/{user_id}")
 async def get_predictions(user_id: int):
+    state = auto_agent_state[user_id]
+    latest_result = state.get('latest_result') or {}
+    morning_prediction = latest_result.get('prediction')
+    reflection = latest_result.get('reflection')
+
+    db_prediction, db_reflection = await asyncio.gather(
+        asyncio.to_thread(_load_latest_morning_prediction_sync, user_id),
+        asyncio.to_thread(_load_latest_reflection_sync, user_id),
+    )
+
+    if not morning_prediction:
+        morning_prediction = db_prediction
+    if not reflection:
+        reflection = db_reflection
+
     return {
-        'morning_prediction': agent.state.get('morning_prediction'),
-        'reflection': agent.state.get('reflection'),
+        'morning_prediction': morning_prediction,
+        'reflection': reflection,
     }
 
 # --- Chatbot Assistance ---
