@@ -118,6 +118,28 @@ const UI = {
         return `<span class="metric-chip ${normalizedTone}">${value}</span>`;
     },
 
+    _toFiniteNumber(value, fallback = 0) {
+        const num = Number(value);
+        return Number.isFinite(num) ? num : fallback;
+    },
+
+    _formatLossPercent(value, digits = 1) {
+        return `${(Math.abs(this._toFiniteNumber(value, 0)) * 100).toFixed(digits)}%`;
+    },
+
+    _formatDecimal(value, digits = 2, fallback = 0) {
+        return this._toFiniteNumber(value, fallback).toFixed(digits);
+    },
+
+    _getBetaDescriptor(value) {
+        const beta = this._toFiniteNumber(value, 0);
+        if (beta < -0.2) return { label: 'Hedge', className: 'defensive' };
+        if (Math.abs(beta) < 0.2) return { label: 'Neutral', className: 'stable' };
+        if (beta > 1.2) return { label: 'Volatile', className: 'volatile' };
+        if (beta >= 0.8) return { label: 'Stable', className: 'stable' };
+        return { label: 'Defensive', className: 'defensive' };
+    },
+
     // ─── AI Insights ─────────────────────────────
     renderAI(insight) {
         if (!insight) return;
@@ -180,7 +202,7 @@ const UI = {
                 text += `${highRiskStocks.map(([s]) => s).join(', ')} có rủi ro cao cần theo dõi. `;
             }
             if (portfolioRisk) {
-                const dd = Math.abs((portfolioRisk.max_drawdown || 0) * 100);
+                const dd = Math.abs(this._toFiniteNumber(portfolioRisk.max_drawdown, 0) * 100);
                 if (dd > 15) text += `Max drawdown ${dd.toFixed(1)}% — mức nguy hiểm.`;
             }
             summary.textContent = text;
@@ -191,8 +213,8 @@ const UI = {
             const signalItems = [];
             Object.entries(stockRisks).forEach(([sym, r]) => {
                 if ((r.risk_score || 0) > 60) signalItems.push(`${sym}: Risk Score ${r.risk_score}/100 — cần giảm tỷ trọng`);
-                else if ((r.sharpe_ratio || 0) > 0.5) signalItems.push(`${sym}: Sharpe ${(r.sharpe_ratio).toFixed(2)} — hiệu quả sinh lời tốt`);
-                else signalItems.push(`${sym}: Beta ${(r.beta || 0).toFixed(2)}, Vol ${((r.volatility || 0) * 100).toFixed(0)}%`);
+                else if ((r.sharpe_ratio || 0) > 0.5) signalItems.push(`${sym}: Sharpe ${this._formatDecimal(r.sharpe_ratio, 2)} — hiệu quả sinh lời tốt`);
+                else signalItems.push(`${sym}: Beta ${this._formatDecimal(r.beta, 2)}, Vol ${(this._toFiniteNumber(r.volatility, 0) * 100).toFixed(0)}%`);
             });
             signals.innerHTML = signalItems.slice(0, 3).map(f =>
                 `<div class="signal-item"><span class="signal-icon check">✓</span><span>${f}</span></div>`
@@ -236,30 +258,30 @@ const UI = {
     updateMetrics(metrics, history) {
         if (!metrics) return;
         const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-        set('m-var', Math.abs((metrics.var_95 || 0) * 100).toFixed(1) + '%');
-        set('m-sharpe', (metrics.sharpe_ratio || 0).toFixed(1));
-        set('m-drawdown', ((metrics.max_drawdown || 0) * -100).toFixed(1) + '%');
-        set('m-beta', (metrics.beta || 0).toFixed(2));
+        set('m-var', this._formatLossPercent(metrics.var_95, 1));
+        set('m-sharpe', this._formatDecimal(metrics.sharpe_ratio, 1));
+        set('m-drawdown', this._formatLossPercent(metrics.max_drawdown, 1));
+        set('m-beta', this._formatDecimal(metrics.beta, 2));
 
-        const sharpe = metrics.sharpe_ratio || 0;
+        const sharpe = this._toFiniteNumber(metrics.sharpe_ratio, 0);
         const sharpe_label = document.getElementById('m-sharpe-sub');
         if (sharpe_label) {
             sharpe_label.textContent = sharpe > 1.2 ? 'Optimal' : sharpe > 0.8 ? 'Good' : sharpe > 0 ? 'Fair' : 'Low';
             sharpe_label.className = `metric-sub ${sharpe > 1.2 ? 'optimal' : sharpe > 0.8 ? 'good' : sharpe > 0 ? 'fair' : 'low'}`;
         }
 
-        const dd = metrics.max_drawdown || 0;
+        const dd = this._toFiniteNumber(metrics.max_drawdown, 0);
         const dd_label = document.getElementById('m-drawdown-sub');
         if (dd_label) {
             dd_label.textContent = dd > 0.15 ? 'Danger' : dd > 0.1 ? 'Monitor' : 'Safe';
             dd_label.className = `metric-sub ${dd > 0.15 ? 'danger' : dd > 0.1 ? 'monitor' : 'safe'}`;
         }
 
-        const beta = metrics.beta || 1;
+        const betaMeta = this._getBetaDescriptor(metrics.beta);
         const beta_label = document.getElementById('m-beta-sub');
         if (beta_label) {
-            beta_label.textContent = beta > 1.2 ? 'Volatile' : beta > 0.8 ? 'Stable' : 'Defensive';
-            beta_label.className = `metric-sub ${beta > 1.2 ? 'volatile' : beta > 0.8 ? 'stable' : 'defensive'}`;
+            beta_label.textContent = betaMeta.label;
+            beta_label.className = `metric-sub ${betaMeta.className}`;
         }
 
         if (history) {
@@ -465,9 +487,9 @@ const UI = {
                     <td class="text-right mono">${this._formatVND(marketVal)}</td>
                     <td class="text-right">${this._renderFinancialChip(`${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%`, pnlTone)}</td>
                     <td class="text-right"><span class="risk-pill ${rcls}">${rs}</span></td>
-                    <td class="text-right mono">${((r.var_95 || 0) * 100).toFixed(2)}%</td>
-                    <td class="text-right mono">${(r.sharpe_ratio || 0).toFixed(2)}</td>
-                    <td class="text-right mono">${(r.beta || 0).toFixed(2)}</td>
+                    <td class="text-right mono">${this._formatLossPercent(r.var_95, 2)}</td>
+                    <td class="text-right mono">${this._formatDecimal(r.sharpe_ratio, 2)}</td>
+                    <td class="text-right mono">${this._formatDecimal(r.beta, 2)}</td>
                 </tr>`;
             }).join('');
         }
@@ -852,13 +874,13 @@ const UI = {
         }
         const m = riskMetrics[symbol] || {};
         const items = [
-            ['VaR 95%', ((m.var_95 || 0) * 100).toFixed(2) + '%'],
-            ['CVaR 95%', ((m.cvar_95 || 0) * 100).toFixed(2) + '%'],
-            ['Sharpe', (m.sharpe_ratio || 0).toFixed(2)],
-            ['Sortino', (m.sortino_ratio || 0).toFixed(2)],
-            ['Beta', (m.beta || 0).toFixed(2)],
-            ['Max DD', ((m.max_drawdown || 0) * 100).toFixed(1) + '%'],
-            ['Volatility', ((m.volatility || 0) * 100).toFixed(1) + '%'],
+            ['VaR 95%', this._formatLossPercent(m.var_95, 2)],
+            ['CVaR 95%', this._formatLossPercent(m.cvar_95, 2)],
+            ['Sharpe', this._formatDecimal(m.sharpe_ratio, 2)],
+            ['Sortino', this._formatDecimal(m.sortino_ratio, 2)],
+            ['Beta', this._formatDecimal(m.beta, 2)],
+            ['Max DD', this._formatLossPercent(m.max_drawdown, 1)],
+            ['Volatility', (this._toFiniteNumber(m.volatility, 0) * 100).toFixed(1) + '%'],
             ['Risk Score', (m.risk_score || 0) + '/100'],
         ];
         grid.innerHTML = items.map(([label, val]) =>

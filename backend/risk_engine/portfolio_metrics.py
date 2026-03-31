@@ -33,6 +33,31 @@ class PortfolioMetrics:
         }
 
 
+def _holding_value(holding: Dict) -> float:
+    """Prefer live market value when available, then latest price, then avg price."""
+    if holding.get('market_value') is not None:
+        try:
+            value = float(holding['market_value'])
+            if np.isfinite(value) and value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+
+    quantity = float(holding.get('quantity', 0) or 0)
+    latest_price = holding.get('latest_price')
+    if latest_price is not None:
+        try:
+            value = quantity * float(latest_price)
+            if np.isfinite(value) and value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+
+    avg_price = float(holding.get('avg_price', 0) or 0)
+    value = quantity * avg_price
+    return value if np.isfinite(value) and value >= 0 else 0.0
+
+
 def calculate_hhi(weights: np.ndarray) -> float:
     """
     Herfindahl-Hirschman Index - measures portfolio concentration.
@@ -225,7 +250,7 @@ def compute_portfolio_metrics(
     """
     # Calculate values and weights
     for h in holdings:
-        h['value'] = h.get('quantity', 0) * h.get('avg_price', 0)
+        h['value'] = _holding_value(h)
     
     total_value = sum(h['value'] for h in holdings)
     weights = np.array([h['value'] / total_value if total_value > 0 else 0 for h in holdings])

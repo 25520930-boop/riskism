@@ -5,6 +5,7 @@ Không cần Docker, không cần API key, chạy offline.
 """
 import sys
 import numpy as np
+from pathlib import Path
 
 print("=" * 60)
 print("🔷 RISKISM — KIỂM TRA TỰ ĐỘNG")
@@ -16,12 +17,13 @@ passed = 0
 # ─── TEST 1: Risk Engine - Core Metrics ──────────────────
 print("\n📊 Test 1: Risk Engine (core_metrics.py)")
 try:
-    sys.path.insert(0, '/Users/khuongdz/.gemini/antigravity/scratch/riskism')
+    repo_root = Path(__file__).resolve().parent
+    sys.path.insert(0, str(repo_root))
     from backend.risk_engine.core_metrics import (
         calculate_returns, calculate_var, calculate_cvar,
         calculate_beta, calculate_sharpe_ratio, calculate_sortino_ratio,
         calculate_max_drawdown, calculate_volatility, calculate_risk_score,
-        compute_all_metrics
+        compute_all_metrics, compute_portfolio_risk_summary
     )
 
     # Tạo dữ liệu giả: 100 ngày giá cổ phiếu
@@ -44,6 +46,13 @@ try:
     assert -5 < beta < 5, f"Beta bất thường: {beta}"
     print(f"  ✅ calculate_beta: {beta:.4f}")
 
+    # Regression: beta phải giữ đúng tỷ lệ co giãn với benchmark
+    doubled_market = np.array([0.005, 0.01, -0.005, 0.015, -0.01])
+    doubled_stock = doubled_market * 2
+    beta_exact = calculate_beta(doubled_stock, doubled_market)
+    assert abs(beta_exact - 2.0) < 1e-9, f"Beta 2x market phải = 2.0, nhưng = {beta_exact}"
+    print(f"  ✅ calculate_beta regression: 2x benchmark → beta={beta_exact:.4f}")
+
     sharpe = calculate_sharpe_ratio(returns)
     print(f"  ✅ calculate_sharpe_ratio: {sharpe:.4f}")
 
@@ -53,6 +62,13 @@ try:
     max_dd, dd_dur = calculate_max_drawdown(prices)
     assert 0 <= max_dd <= 1, f"MaxDrawdown phải 0-1, nhưng = {max_dd}"
     print(f"  ✅ calculate_max_drawdown: {max_dd:.4f} ({dd_dur} ngày)")
+
+    # Regression: duration phải là peak-to-recovery, không phải peak-to-trough
+    dd_prices = np.array([100, 120, 110, 90, 95, 125], dtype=float)
+    dd_value, dd_duration = calculate_max_drawdown(dd_prices)
+    assert abs(dd_value - 0.25) < 1e-9, f"Max drawdown phải = 25%, nhưng = {dd_value}"
+    assert dd_duration == 4, f"Duration phải từ peak tới recovery (=4), nhưng = {dd_duration}"
+    print(f"  ✅ calculate_max_drawdown regression: dd={dd_value:.4f}, duration={dd_duration} ngày")
 
     ann_vol, daily_vol = calculate_volatility(returns)
     assert ann_vol > 0, "Volatility phải > 0"
@@ -67,6 +83,50 @@ try:
     assert d['symbol'] == 'TEST'
     assert all(k in d for k in ['var_95', 'cvar_95', 'beta', 'sharpe_ratio', 'sortino_ratio', 'max_drawdown', 'risk_score'])
     print(f"  ✅ compute_all_metrics: đầy đủ {len(d)} chỉ số")
+
+    # Regression: portfolio metrics phải dựa trên value series thực tế, không phải weighted log returns
+    portfolio_holdings = [
+        {'symbol': 'AAA', 'quantity': 1, 'avg_price': 100},
+        {'symbol': 'BBB', 'quantity': 1, 'avg_price': 100},
+    ]
+    portfolio_market_data = {
+        'AAA': {'dates': ['2024-01-01', '2024-01-02', '2024-01-03'], 'close': [100, 150, 100]},
+        'BBB': {'dates': ['2024-01-01', '2024-01-02', '2024-01-03'], 'close': [100, 50, 100]},
+        'VNINDEX': {'dates': ['2024-01-01', '2024-01-02', '2024-01-03'], 'close': [100, 150, 100]},
+    }
+    portfolio_returns_dict = {
+        'AAA': calculate_returns(np.array([100, 150, 100], dtype=float)),
+        'BBB': calculate_returns(np.array([100, 50, 100], dtype=float)),
+    }
+    portfolio_summary = compute_portfolio_risk_summary(
+        portfolio_holdings,
+        portfolio_returns_dict,
+        portfolio_market_data,
+    )
+    current_risk = portfolio_summary['current_risk']
+    assert abs(current_risk['var_95']) < 1e-12, f"Portfolio VaR phải = 0 khi value series phẳng, nhưng = {current_risk['var_95']}"
+    assert abs(current_risk['max_drawdown']) < 1e-12, f"Portfolio max drawdown phải = 0 khi value series phẳng, nhưng = {current_risk['max_drawdown']}"
+    assert abs(current_risk['beta']) < 1e-12, f"Portfolio beta phải = 0 khi danh mục phẳng, nhưng = {current_risk['beta']}"
+    print("  ✅ compute_portfolio_risk_summary regression: VaR/Beta/MaxDD đúng trên danh mục offsetting")
+
+    # Regression: mixed date formats across data sources must still align portfolio series
+    mixed_date_market_data = {
+        'AAA': {'dates': ['2024-01-01', '2024-01-02', '2024-01-03'], 'close': [100, 110, 90]},
+        'BBB': {'dates': ['2024-01-01 07:00:00', '2024-01-02 07:00:00', '2024-01-03 07:00:00'], 'close': [100, 95, 92]},
+        'VNINDEX': {'dates': ['2024-01-01', '2024-01-02', '2024-01-03'], 'close': [100, 102, 101]},
+    }
+    mixed_returns_dict = {
+        'AAA': calculate_returns(np.array([100, 110, 90], dtype=float)),
+        'BBB': calculate_returns(np.array([100, 95, 92], dtype=float)),
+    }
+    mixed_summary = compute_portfolio_risk_summary(
+        portfolio_holdings,
+        mixed_returns_dict,
+        mixed_date_market_data,
+    )
+    mixed_risk = mixed_summary['current_risk']
+    assert any(abs(mixed_risk[k]) > 1e-12 for k in ['var_95', 'max_drawdown']), f"Mixed date formats không được làm portfolio risk về 0: {mixed_risk}"
+    print("  ✅ compute_portfolio_risk_summary regression: mixed date formats vẫn align đúng")
 
     passed += 1
     print("  ✅ PASS — Core Metrics hoạt động đúng!")

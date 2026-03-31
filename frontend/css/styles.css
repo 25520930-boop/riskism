@@ -664,8 +664,14 @@ body.auth-active {
     margin-top: 2px;
 }
 .metric-sub.optimal { color: var(--up); }
+.metric-sub.good { color: var(--up); }
+.metric-sub.fair { color: var(--info); }
+.metric-sub.low { color: var(--text-muted); }
+.metric-sub.safe { color: var(--up); }
 .metric-sub.monitor { color: var(--warn); }
+.metric-sub.volatile { color: var(--down); }
 .metric-sub.stable { color: var(--info); }
+.metric-sub.defensive { color: var(--up); }
 .metric-sub.danger { color: var(--down); }
 
 .spark-container {

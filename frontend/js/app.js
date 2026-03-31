@@ -290,16 +290,19 @@ class RiskismApp {
     }
 
     showLoginModal() {
-        this.setAuthMode('signin');
-        document.getElementById('login-username')?.value = '';
-        document.getElementById('login-password')?.value = '';
-        document.getElementById('login-password-confirm')?.value = '';
-        document.getElementById('modal-login')?.classList.add('active');
-        document.body.classList.add('auth-active');
-        window.setTimeout(() => {
-            document.getElementById('login-username')?.focus();
-        }, 80);
-    }
+    this.setAuthMode('signin');
+    const u = document.getElementById('login-username');
+    const p = document.getElementById('login-password');
+    const c = document.getElementById('login-password-confirm');
+    if (u) u.value = '';
+    if (p) p.value = '';
+    if (c) c.value = '';
+    document.getElementById('modal-login')?.classList.add('active');
+    document.body.classList.add('auth-active');
+    window.setTimeout(() => {
+        document.getElementById('login-username')?.focus();
+    }, 80);
+}
 
     hideLoginModal() {
         document.getElementById('modal-login')?.classList.remove('active');

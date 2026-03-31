@@ -90,14 +90,26 @@ def calculate_beta(stock_returns: np.ndarray, market_returns: np.ndarray) -> flo
     """
     if len(stock_returns) < 2 or len(market_returns) < 2:
         return 1.0
+
     # Align lengths
     min_len = min(len(stock_returns), len(market_returns))
-    s = stock_returns[-min_len:]
-    m = market_returns[-min_len:]
-    covariance = np.cov(s, m)[0][1]
-    market_variance = np.var(m)
-    if market_variance == 0:
+    s = np.asarray(stock_returns[-min_len:], dtype=float)
+    m = np.asarray(market_returns[-min_len:], dtype=float)
+
+    finite_mask = np.isfinite(s) & np.isfinite(m)
+    s = s[finite_mask]
+    m = m[finite_mask]
+    if len(s) < 2:
         return 1.0
+
+    # Use a consistent population-style estimator for both covariance and variance.
+    s_centered = s - np.mean(s)
+    m_centered = m - np.mean(m)
+    market_variance = float(np.mean(m_centered ** 2))
+    if market_variance <= 0:
+        return 1.0
+
+    covariance = float(np.mean(s_centered * m_centered))
     return float(covariance / market_variance)
 
 
@@ -133,25 +145,48 @@ def calculate_max_drawdown(prices: np.ndarray) -> Tuple[float, int]:
     """
     Maximum Drawdown & Duration.
     Returns (max_drawdown_percentage, duration_in_days).
+    Duration is measured from the peak that started the max drawdown
+    until recovery back to that peak. If recovery has not happened yet,
+    duration extends to the latest observation.
     """
     if len(prices) < 2:
         return 0.0, 0
 
+    prices = np.asarray(prices, dtype=float)
     peak = prices[0]
+    peak_idx = 0
     max_dd = 0.0
-    max_dd_duration = 0
-    current_dd_start = 0
+    max_dd_peak = peak
+    max_dd_peak_idx = 0
+    max_dd_trough_idx = 0
 
     for i in range(1, len(prices)):
-        if prices[i] > peak:
+        if prices[i] >= peak:
             peak = prices[i]
-            current_dd_start = i
+            peak_idx = i
+
         drawdown = (peak - prices[i]) / peak
         if drawdown > max_dd:
             max_dd = drawdown
-            max_dd_duration = i - current_dd_start
+            max_dd_peak = peak
+            max_dd_peak_idx = peak_idx
+            max_dd_trough_idx = i
 
-    return float(max_dd), int(max_dd_duration)
+    if max_dd == 0:
+        return 0.0, 0
+
+    recovery_idx = None
+    for i in range(max_dd_trough_idx + 1, len(prices)):
+        if prices[i] >= max_dd_peak:
+            recovery_idx = i
+            break
+
+    if recovery_idx is None:
+        duration = len(prices) - 1 - max_dd_peak_idx
+    else:
+        duration = recovery_idx - max_dd_peak_idx
+
+    return float(max_dd), int(duration)
 
 
 def calculate_calmar_ratio(returns: np.ndarray, max_drawdown: float) -> float:
@@ -197,6 +232,82 @@ def calculate_volatility(returns: np.ndarray) -> Tuple[float, float]:
     daily_vol = float(np.std(returns))
     annual_vol = daily_vol * np.sqrt(252)
     return annual_vol, daily_vol
+
+
+def _prepare_price_series(data: Dict) -> Tuple[List[str], Dict[str, float]]:
+    """
+    Normalize an OHLCV payload into an ordered date list and date->close map.
+    Invalid or non-positive prices are discarded.
+    """
+    dates = data.get('dates', []) or []
+    closes = data.get('close', []) or []
+    if len(dates) != len(closes):
+        return [], {}
+
+    ordered_dates: List[str] = []
+    date_to_close: Dict[str, float] = {}
+    for raw_date, raw_close in zip(dates, closes):
+        try:
+            close = float(raw_close)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(close) or close <= 0:
+            continue
+        # Some sources return date-only strings while others include a time component.
+        # Normalize both to YYYY-MM-DD so multi-asset alignment still works.
+        date = str(raw_date).strip()[:10]
+        if len(date) != 10:
+            continue
+        ordered_dates.append(date)
+        date_to_close[date] = close
+
+    return ordered_dates, date_to_close
+
+
+def _build_portfolio_value_series(
+    holdings: List[Dict],
+    market_data: Dict,
+) -> Tuple[List[str], np.ndarray]:
+    """
+    Build the exact historical portfolio value series from quantities and prices.
+    This is more accurate than weighting individual return series because it
+    naturally captures offsetting moves and changing effective weights over time.
+    """
+    series_parts = []
+    for holding in holdings:
+        symbol = holding.get('symbol')
+        quantity = float(holding.get('quantity', 0) or 0)
+        if not symbol or quantity <= 0:
+            continue
+
+        ordered_dates, date_to_close = _prepare_price_series(market_data.get(symbol, {}))
+        if len(ordered_dates) < 2:
+            continue
+
+        series_parts.append((symbol, quantity, ordered_dates, date_to_close))
+
+    if not series_parts:
+        return [], np.array([])
+
+    common_dates = set(series_parts[0][3].keys())
+    for _, _, _, date_to_close in series_parts[1:]:
+        common_dates &= set(date_to_close.keys())
+
+    if len(common_dates) < 2:
+        return [], np.array([])
+
+    ordered_common_dates = [d for d in series_parts[0][2] if d in common_dates]
+    if len(ordered_common_dates) < 2:
+        return [], np.array([])
+
+    portfolio_values = []
+    for date in ordered_common_dates:
+        total_value = 0.0
+        for _, quantity, _, date_to_close in series_parts:
+            total_value += quantity * date_to_close[date]
+        portfolio_values.append(total_value)
+
+    return ordered_common_dates, np.array(portfolio_values, dtype=float)
 
 
 def calculate_risk_score(metrics_dict: Dict) -> int:
@@ -433,48 +544,44 @@ def compute_portfolio_risk_summary(
     valid_symbols = [s for s in symbols if s in returns_dict and len(returns_dict[s]) > 1]
     if not valid_symbols:
         return {'current_risk': current_risk, 'metrics_history': metrics_history, 'stock_metrics': stock_metrics}
-    
-    total_val = sum(h.get('avg_price', 0) * h.get('quantity', 0) for h in holdings)
-    weights = []
-    for h in holdings:
-        if total_val > 0:
-            weights.append((h.get('avg_price', 0) * h.get('quantity', 0)) / total_val)
-        else:
-            weights.append(0)
-    
-    min_len = min(len(returns_dict[s]) for s in valid_symbols)
-    if min_len < 2:
+
+    portfolio_dates, portfolio_prices = _build_portfolio_value_series(holdings, market_data)
+    if len(portfolio_prices) < 2:
         return {'current_risk': current_risk, 'metrics_history': metrics_history, 'stock_metrics': stock_metrics}
-    
-    # Build weighted portfolio returns
-    portfolio_returns = np.zeros(min_len)
-    for i, h in enumerate(holdings):
-        sym = h['symbol']
-        if sym in returns_dict:
-            portfolio_returns += weights[i] * returns_dict[sym][-min_len:]
-    
-    # Current risk values
-    portfolio_prices = np.exp(np.cumsum(np.insert(portfolio_returns, 0, 0))) * 1000
+
+    portfolio_returns = calculate_returns(portfolio_prices)
+    if len(portfolio_returns) < 1:
+        return {'current_risk': current_risk, 'metrics_history': metrics_history, 'stock_metrics': stock_metrics}
+
     current_risk['var_95'] = float(calculate_var(portfolio_returns, 0.95))
     current_risk['sharpe_ratio'] = float(calculate_sharpe_ratio(portfolio_returns))
     dd, _ = calculate_max_drawdown(portfolio_prices)
     current_risk['max_drawdown'] = float(dd)
-    
-    # Beta vs VNINDEX
-    if market_prices is not None and len(market_prices) > 1:
-        market_returns = calculate_returns(market_prices)
-        current_risk['beta'] = float(calculate_beta(portfolio_returns, market_returns))
-    
+
+    aligned_market_prices = None
+    if vnindex_data:
+        _, market_date_to_close = _prepare_price_series(vnindex_data)
+        if market_date_to_close:
+            aligned_dates = [d for d in portfolio_dates if d in market_date_to_close]
+            if len(aligned_dates) >= 2:
+                portfolio_value_map = dict(zip(portfolio_dates, portfolio_prices))
+                aligned_portfolio_prices = np.array([portfolio_value_map[d] for d in aligned_dates], dtype=float)
+                aligned_market_prices = np.array([market_date_to_close[d] for d in aligned_dates], dtype=float)
+
+                market_returns = calculate_returns(aligned_market_prices)
+                aligned_portfolio_returns = calculate_returns(aligned_portfolio_prices)
+                if len(aligned_portfolio_returns) > 1 and len(market_returns) > 1:
+                    current_risk['beta'] = float(calculate_beta(aligned_portfolio_returns, market_returns))
+
     # Rolling history for sparklines (need enough data points)
-    if min_len > 25:
-        vnindex_prices = np.array(vnindex_data.get('close', [])) if vnindex_data else None
+    if len(portfolio_prices) > 25:
         metrics_history = compute_rolling_metrics(
             portfolio_prices,
-            vnindex_prices,
+            aligned_market_prices,
             window=20,
             num_points=30
         )
-    
+
     return {
         'current_risk': current_risk,
         'metrics_history': metrics_history,
