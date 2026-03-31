@@ -485,6 +485,36 @@ try:
         f"Chatbot phải hỗ trợ requirement, nhưng nhận: {requirement_reply}"
     print("  ✅ Chatbot fallback: trả lời được câu hỏi requirement")
 
+    class _FakeResponse:
+        def __init__(self, text):
+            self.text = text
+
+    class _FakeModels:
+        def __init__(self):
+            self.calls = []
+
+        def generate_content(self, model, contents, config):
+            self.calls.append(model)
+            if model == 'gemini-2.5-pro':
+                raise Exception("404 NOT_FOUND: model is not supported")
+            return _FakeResponse('{"ok": true}')
+
+    class _FakeClient:
+        def __init__(self):
+            self.models = _FakeModels()
+
+    router_retry = LLMRouter()
+    router_retry.client = _FakeClient()
+    router_retry.model_sequences = {
+        'fast': ['gemini-2.5-flash'],
+        'reasoning': ['gemini-2.5-pro'],
+        'fallback': ['gemini-2.5-flash'],
+    }
+    retry_text = router_retry._call_gemini('test prompt', 'system', model_tier='reasoning')
+    assert retry_text == '{"ok": true}', f"Router phải fallback sang model kế tiếp khi model đầu 404, nhưng nhận: {retry_text}"
+    assert router_retry._last_working_model == 'gemini-2.5-flash', f"Model working cuối cùng phải là fallback flash, nhưng = {router_retry._last_working_model}"
+    print("  ✅ Gemini router: tự fallback sang model dự phòng khi model đầu không hỗ trợ")
+
     passed += 1
     print("  ✅ PASS — AI insight fallback và chatbot heuristic hoạt động đúng!")
 
@@ -615,9 +645,44 @@ except Exception as e:
     print(f"  ❌ FAIL: {e}")
 
 
+# ─── TEST 12: No Demo Masking On Authenticated Screens ───
+print("\n🧪 Test 12: No demo masking on authenticated screens")
+try:
+    main_source = (repo_root / 'backend' / 'main.py').read_text()
+    orchestrator_source = (repo_root / 'backend' / 'agent' / 'orchestrator.py').read_text()
+    api_source = (repo_root / 'frontend' / 'js' / 'api.js').read_text()
+    app_source = (repo_root / 'frontend' / 'js' / 'app.js').read_text()
+    components_source = (repo_root / 'frontend' / 'js' / 'components.js').read_text()
+    charts_source = (repo_root / 'frontend' / 'js' / 'charts.js').read_text()
+    index_source = (repo_root / 'frontend' / 'index.html').read_text()
+
+    assert 'mock_portfolio' not in main_source, "backend/main.py không được mock portfolio khi save lỗi"
+    assert 'demo_mode' not in main_source, "Portfolio update không được trả demo_mode success giả"
+    assert 'mock_portfolio' not in orchestrator_source, "Agent orchestrator không được rơi về mock_portfolio nữa"
+    assert "return this.hasAccessToken() ? this.getDemoPortfolio() : null;" not in api_source, "getPortfolio không được fallback sang demo sau khi login"
+    assert "return this.hasAccessToken() ? this.getDemoPortfolioRisk() : null;" not in api_source, "getPortfolioRisk không được fallback sang demo sau khi login"
+    assert "return this.getDemoAgentResult();" not in api_source, "triggerAgent không được fallback sang demo result"
+    assert 'class RiskismAPIError extends Error' in api_source, "API client phải có structured error cho protected endpoints"
+    assert 'UI.renderLiveSyncIssue' in app_source, "App phải render trạng thái lỗi thật khi chưa có snapshot"
+    assert "this.updateStatusBar('connected');" in app_source, "App vẫn phải cập nhật lại trạng thái connected khi sync thành công"
+    assert "this.loadAllData();\n            this.updateStatusBar('connected');" not in app_source, "Không được ép status bar về connected mỗi chu kỳ poll"
+    assert 'showAIUnavailable' in components_source and 'renderLiveSyncIssue' in components_source, "UI phải có trạng thái degraded thay vì sample data"
+    assert 'WAITING FOR LIVE DATA' in index_source, "index.html phải bỏ sample placeholder và dùng live-state placeholder"
+    assert '_placeholderSeries' in charts_source and '_generateSmoothCurve' not in charts_source, "charts không được vẽ demo sparkline khi chưa có data"
+    print("  ✅ Protected UI/API: không còn fallback demo sau khi user đã đăng nhập")
+    print("  ✅ Dashboard placeholders: chuyển sang live-state/degraded-state rõ ràng")
+
+    passed += 1
+    print("  ✅ PASS — Authenticated flow không còn che lỗi bằng dữ liệu demo!")
+
+except Exception as e:
+    errors.append(f"No Demo Masking: {e}")
+    print(f"  ❌ FAIL: {e}")
+
+
 # ─── KẾT QUẢ TỔNG ────────────────────────────────────────
 print("\n" + "=" * 60)
-print(f"📊 KẾT QUẢ: {passed}/11 tests PASSED")
+print(f"📊 KẾT QUẢ: {passed}/12 tests PASSED")
 if errors:
     print(f"❌ LỖI ({len(errors)}):")
     for e in errors:

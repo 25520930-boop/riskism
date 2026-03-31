@@ -5,6 +5,7 @@ Routes AI tasks to Google Gemini with appropriate prompts.
 import json
 import hashlib
 import re
+import time
 from typing import Dict, List, Optional
 from backend.config import get_settings
 from backend.utils.perf import TTLCache
@@ -27,55 +28,117 @@ class LLMRouter:
         self.client = None
         if GENAI_AVAILABLE and settings.gemini_api_key:
             self.client = genai.Client(api_key=settings.gemini_api_key)
-        
-        # Multi-LLM Routing Map (Match Proposal)
-        self.models = {
-            "fast": "gemini-1.5-flash",           # More stable quota on free tier
-            "reasoning": "gemini-1.5-flash", 
-            "fallback": "gemini-1.5-flash"
+
+        self.model_sequences = {
+            "fast": self._parse_model_list(settings.gemini_fast_models, ["gemini-2.5-flash", "gemini-2.0-flash"]),
+            "reasoning": self._parse_model_list(settings.gemini_reasoning_models, ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]),
+            "fallback": self._parse_model_list(settings.gemini_fallback_models, ["gemini-2.5-flash", "gemini-2.0-flash"]),
         }
+        self._last_error_detail = ""
+        self._last_error_type = "ok"
+        self._last_working_model = None
+        self._disabled_until = 0.0
 
         # Response cache: avoid re-scoring identical articles (30min TTL)
         self._cache = TTLCache(maxsize=256, ttl_seconds=1800)
         self._cache_hits = 0
         self._cache_misses = 0
 
+    def _parse_model_list(self, raw_value: str, defaults: List[str]) -> List[str]:
+        candidates = [item.strip() for item in str(raw_value or "").split(",") if item.strip()]
+        return candidates or list(defaults)
+
+    def _candidate_models(self, model_tier: str) -> List[str]:
+        tier = model_tier if model_tier in self.model_sequences else "fallback"
+        candidates = list(self.model_sequences.get(tier) or [])
+        if tier != "fallback":
+            for fallback_model in self.model_sequences.get("fallback", []):
+                if fallback_model not in candidates:
+                    candidates.append(fallback_model)
+        return candidates
+
+    def runtime_status(self) -> Dict:
+        cooldown_remaining = max(0, int(self._disabled_until - time.time()))
+        return {
+            "provider": "gemini" if GENAI_AVAILABLE else "unavailable",
+            "configured": bool(self.client),
+            "status": "cooldown" if cooldown_remaining > 0 else ("ready" if self.client else "fallback_only"),
+            "last_working_model": self._last_working_model,
+            "last_error_type": self._last_error_type,
+            "last_error_detail": self._last_error_detail,
+            "cooldown_seconds": cooldown_remaining,
+            "configured_models": self.model_sequences,
+        }
+
     def _call_gemini(self, prompt: str, system_instruction: str = "", temperature: float = 0.3, model_tier: str = "fast") -> str:
         """Call Gemini API with router logic."""
         if not self.client:
-            return self._mock_response(prompt)
-        
-        # Router logic selecting model based on tier
-        model_name = self.models.get(model_tier, self.models["fallback"])
-        
-        try:
-            response = self.client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=temperature,
-                    max_output_tokens=2048,
-                ),
-            )
-            return response.text or ""
-        except Exception as e:
-            error_msg = str(e).lower()
-            if (
-                "api key" in error_msg
-                or "401" in error_msg
-                or "403" in error_msg
-                or "expired" in error_msg
-                or "429" in error_msg
-                or "resource_exhausted" in error_msg
-                or "quota exceeded" in error_msg
-            ):
-                print(f"[LLMRouter] CRITICAL: Gemini API Key is invalid or expired: {e}")
-                # Store this state to avoid repeated failing calls
-                self.client = None 
-            else:
-                print(f"[LLMRouter] Gemini ({model_name}) error: {e}")
-            return self._mock_response(prompt, is_error=True, error_detail=str(e))
+            self._last_error_type = "client_unavailable"
+            self._last_error_detail = "Gemini client is not configured."
+            return self._mock_response(prompt, is_error=True, error_detail=self._last_error_detail)
+
+        if self._disabled_until > time.time():
+            self._last_error_type = "cooldown"
+            self._last_error_detail = f"LLM temporarily paused for {int(self._disabled_until - time.time())}s after repeated provider errors."
+            return self._mock_response(prompt, is_error=True, error_detail=self._last_error_detail)
+
+        last_error = None
+        for model_name in self._candidate_models(model_tier):
+            try:
+                response = self.client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=temperature,
+                        max_output_tokens=2048,
+                    ),
+                )
+                self._last_working_model = model_name
+                self._last_error_type = "ok"
+                self._last_error_detail = ""
+                return response.text or ""
+            except Exception as e:
+                last_error = e
+                error_msg = str(e).lower()
+                self._last_error_detail = str(e)
+
+                if (
+                    "api key" in error_msg
+                    or "401" in error_msg
+                    or "403" in error_msg
+                    or "expired" in error_msg
+                ):
+                    self._last_error_type = "auth"
+                    print(f"[LLMRouter] CRITICAL: Gemini auth/config error on {model_name}: {e}")
+                    self.client = None
+                    break
+
+                if (
+                    "429" in error_msg
+                    or "resource_exhausted" in error_msg
+                    or "quota exceeded" in error_msg
+                ):
+                    self._last_error_type = "quota"
+                    self._disabled_until = time.time() + 300
+                    print(f"[LLMRouter] Gemini quota/capacity error on {model_name}, entering cooldown: {e}")
+                    break
+
+                if (
+                    "not_found" in error_msg
+                    or "not found" in error_msg
+                    or "unsupported" in error_msg
+                    or "model" in error_msg and "supported" in error_msg
+                ):
+                    self._last_error_type = "model_not_found"
+                    print(f"[LLMRouter] Gemini model {model_name} unavailable, trying fallback model: {e}")
+                    continue
+
+                self._last_error_type = "provider_error"
+                print(f"[LLMRouter] Gemini ({model_name}) error, trying fallback if available: {e}")
+                continue
+
+        return self._mock_response(prompt, is_error=True, error_detail=str(last_error or self._last_error_detail))
 
     def _extract_json(self, text: str) -> Optional[dict]:
         """Robustly extract JSON from LLM response text."""
@@ -892,7 +955,7 @@ Phân tích (JSON):
         
         if 'assistant:' in prompt.lower():
             if is_error or not self.client:
-                return f"⚠️ [Sự cố AI] Google Gemini API Key đã hết hạn hoặc chưa được cấu hình! {error_context}. Vui lòng kiểm tra lại file .env của bạn."
+                return f"⚠️ [Sự cố AI] Gemini hiện chưa khả dụng và hệ thống đang dùng câu trả lời dự phòng.{error_context}"
             return "Xin lỗi, hiện tại tôi không thể kết nối với bộ não chính. Lời nhắc: Bạn có thể kiểm tra VaR (Value at Risk) trong tab Portfolio nhé!"
             
         elif 'sentiment' in prompt.lower():

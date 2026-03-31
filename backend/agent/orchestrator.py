@@ -96,27 +96,6 @@ class AgentOrchestrator:
             self.log('ERROR', f'News fetch failed: {e}')
             return []
 
-    def _fallback_portfolio(self, user_id: int) -> Dict:
-        """Fallback if DB is empty/fails."""
-        if 'mock_portfolio' in self.state:
-            portfolio = self.state['mock_portfolio']
-            portfolio['user_id'] = user_id
-            self.state['portfolio'] = portfolio
-            return portfolio
-
-        portfolio = {
-            'user_id': user_id,
-            'risk_appetite': 'moderate',
-            'capital_amount': 20_000_000,
-            'holdings': [
-                {'symbol': 'VCB', 'quantity': 100, 'avg_price': 85000, 'sector': 'Banking'},
-                {'symbol': 'FPT', 'quantity': 50, 'avg_price': 120000, 'sector': 'Technology'},
-                {'symbol': 'HPG', 'quantity': 200, 'avg_price': 26000, 'sector': 'Industrial'},
-            ]
-        }
-        self.state['portfolio'] = portfolio
-        return portfolio
-
     def _get_portfolio_sync(self, user_id: int) -> Dict:
         """Synchronous part of tool_get_portfolio."""
         from backend.database import SyncSessionLocal
@@ -130,7 +109,7 @@ class AgentOrchestrator:
             ).fetchone()
             
             if not user_result:
-                return self._fallback_portfolio(user_id)
+                raise ValueError(f"User {user_id} not found")
                 
             holdings_result = db.execute(
                 text("SELECT symbol, quantity, avg_price, sector FROM portfolios WHERE user_id = :uid AND quantity > 0"),
@@ -139,8 +118,8 @@ class AgentOrchestrator:
             
             return {
                 'user_id': user_id,
-                'risk_appetite': user_result[0],
-                'capital_amount': float(user_result[1]),
+                'risk_appetite': user_result[0] or 'moderate',
+                'capital_amount': float(user_result[1] or 0),
                 'holdings': [
                     {
                         'symbol': r[0],
@@ -157,7 +136,7 @@ class AgentOrchestrator:
             }
         except Exception as e:
             print(f"[Agent] DB Error in _get_portfolio_sync: {e}")
-            return self._fallback_portfolio(user_id)
+            raise
         finally:
             if db: db.close()
 

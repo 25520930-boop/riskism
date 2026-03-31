@@ -240,6 +240,147 @@ const UI = {
         return `${normalized.slice(0, maxLength - 1).trim()}…`;
     },
 
+    resetMetrics(statusLabel = 'WAITING FOR LIVE DATA') {
+        const set = (id, val) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = val;
+        };
+        set('m-var', '—');
+        set('m-var-delta', statusLabel);
+        set('m-sharpe', '—');
+        set('m-drawdown', '—');
+        set('m-beta', '—');
+
+        const varDelta = document.getElementById('m-var-delta');
+        if (varDelta) varDelta.className = 'metric-delta neutral';
+
+        const sharpeLabel = document.getElementById('m-sharpe-sub');
+        if (sharpeLabel) {
+            sharpeLabel.textContent = 'Waiting';
+            sharpeLabel.className = 'metric-sub fair';
+        }
+
+        const drawdownLabel = document.getElementById('m-drawdown-sub');
+        if (drawdownLabel) {
+            drawdownLabel.textContent = 'Waiting';
+            drawdownLabel.className = 'metric-sub monitor';
+        }
+
+        const betaLabel = document.getElementById('m-beta-sub');
+        if (betaLabel) {
+            betaLabel.textContent = 'Waiting';
+            betaLabel.className = 'metric-sub stable';
+        }
+
+        charts.drawAllSparklines(null);
+    },
+
+    showAIUnavailable(message = 'Live AI insights are temporarily unavailable.') {
+        const badge = document.getElementById('ai-risk-badge');
+        const summary = document.getElementById('ai-summary');
+        const signals = document.getElementById('ai-signals');
+        const trends = document.getElementById('ai-trends-body');
+        const fill = document.getElementById('confidence-fill');
+
+        if (badge) {
+            badge.textContent = 'LIVE SYNC ISSUE';
+            badge.className = 'badge badge-risk medium';
+        }
+        if (summary) {
+            summary.textContent = message;
+        }
+        if (signals) {
+            signals.innerHTML = `
+                <div class="signal-item">
+                    <span class="signal-icon check">!</span>
+                    <span>${this._clipText(message, 120)}</span>
+                </div>
+            `;
+        }
+        if (trends) {
+            trends.innerHTML = '<tr><td colspan="3" class="mono" style="text-align:center;color:var(--text-muted);">Waiting for live portfolio data</td></tr>';
+        }
+        if (fill) {
+            fill.style.width = '0%';
+        }
+    },
+
+    renderLiveSyncIssue(message = 'Live portfolio data is temporarily unavailable.') {
+        const tbody = document.getElementById('holdings-tbody');
+        const setEl = (id, val) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = val;
+        };
+
+        this._prevPrices.clear();
+        setEl('dash-total-value', '—');
+        setEl('dash-total-pnl-pct', '—');
+        setEl('dash-total-pnl', '—');
+
+        const pnlPctEl = document.getElementById('dash-total-pnl-pct');
+        if (pnlPctEl) pnlPctEl.className = 'mono';
+        const pnlEl = document.getElementById('dash-total-pnl');
+        if (pnlEl) pnlEl.className = 'mono';
+
+        if (tbody) {
+            tbody.innerHTML = `<tr><td colspan="5">
+                <div class="empty-state">
+                    <div class="empty-state-icon">⚠️</div>
+                    <div class="empty-state-title">Live portfolio sync unavailable</div>
+                    <div class="empty-state-desc">${message}</div>
+                </div>
+            </td></tr>`;
+        }
+
+        this.resetMetrics('LIVE SYNC ISSUE');
+        this.showAIUnavailable(message);
+
+        const heatmap = document.getElementById('heatmap-grid');
+        if (heatmap) {
+            heatmap.innerHTML = `<div class="empty-msg">${message}</div>`;
+        }
+
+        const select = document.getElementById('ra-symbol-select');
+        if (select) {
+            select.innerHTML = '<option value="">Live sync unavailable</option>';
+        }
+
+        const detailGrid = document.getElementById('risk-detail-grid');
+        if (detailGrid) {
+            detailGrid.innerHTML = `<div class="empty-msg">${message}</div>`;
+        }
+
+        const anomalyBadge = document.getElementById('anomaly-badge');
+        if (anomalyBadge) {
+            anomalyBadge.textContent = '!';
+        }
+
+        const anomalyFeed = document.getElementById('anomaly-feed');
+        if (anomalyFeed) {
+            anomalyFeed.innerHTML = `<div class="empty-msg">${message}</div>`;
+        }
+
+        const correlationWrap = document.getElementById('correlation-wrap');
+        if (correlationWrap) {
+            correlationWrap.innerHTML = `<div class="empty-msg">${message}</div>`;
+        }
+
+        const sectorBars = document.getElementById('sector-bars');
+        if (sectorBars) {
+            sectorBars.innerHTML = `<div class="empty-msg">${message}</div>`;
+        }
+
+        const adviceContent = document.getElementById('advice-content');
+        if (adviceContent) {
+            adviceContent.innerHTML = `<div class="empty-msg">${message}</div>`;
+        }
+
+        const fullHoldings = document.getElementById('full-holdings-tbody');
+        if (fullHoldings) {
+            fullHoldings.innerHTML = `<tr><td colspan="10"><div class="empty-msg">${message}</div></td></tr>`;
+        }
+    },
+
     // ─── AI Insights ─────────────────────────────
     renderAI(insight, stockRisks = null, portfolioRisk = null) {
         if (!insight) return;
@@ -508,7 +649,17 @@ const UI = {
     // ─── Portfolio Tab ───────────────────────────
     renderPortfolio(data) {
         if (!data) return;
-        const { portfolio, portfolio_metrics, capital_advice, stock_risks, portfolio_risk } = data;
+        const portfolio = data?.portfolio || { holdings: [], total_market_value: 0, total_pnl: 0, total_pnl_pct: 0 };
+        const portfolio_metrics = data?.portfolio_metrics || {};
+        const capital_advice = data?.capital_advice || {
+            capital_tier: 'small',
+            max_positions: 0,
+            position_size_pct: 0,
+            warnings: [],
+            suggested_next_symbols: [],
+        };
+        const stock_risks = data?.stock_risks || {};
+        const portfolio_risk = data?.portfolio_risk || {};
         const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
         const holdings = portfolio?.holdings || [];
 
@@ -1399,12 +1550,17 @@ const UI = {
                     this.chatHistory.push({ sender: 'user', text });
                     this.chatHistory.push({ sender: 'assistant', text: res.reply });
                 } else {
-                    appendMsg("Xin lỗi, kết nối bị lỗi. Bạn thử lại nhé!", 'ai');
+                    appendMsg("Xin lỗi, mình chưa lấy được phản hồi từ server. Bạn thử lại giúp mình nhé.", 'ai');
                 }
             } catch (err) {
                 console.error(err);
                 hideTyping();
-                appendMsg("Hệ thống AI hiện không phản hồi. Bạn thử lại sau nhé!", 'ai');
+                if (Number(err?.status || 0) === 401) {
+                    window.app?.showLoginModal?.();
+                    appendMsg("Phiên đăng nhập của bạn đã hết hạn. Đăng nhập lại rồi mình trả lời tiếp nhé.", 'ai');
+                    return;
+                }
+                appendMsg(err?.detail || "Hệ thống AI hiện chưa phản hồi được. Bạn thử lại sau ít phút nhé.", 'ai');
             }
         };
 

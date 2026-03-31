@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=DM+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/styles.css?v=29">
+    <link rel="stylesheet" href="css/styles.css?v=32">
 </head>
 <body>
     <!-- ═══ TOP BAR: Brand + Market Tabs + Live Ticker ═══ -->
@@ -124,7 +124,7 @@
                 <div class="card card-ai" id="card-ai">
                     <div class="card-top">
                         <h2 class="card-title"><span class="ai-sparkle">✦</span> AI Insights</h2>
-                        <span class="badge badge-risk medium" id="ai-risk-badge">ANALYZING...</span>
+                        <span class="badge badge-risk medium" id="ai-risk-badge">WAITING FOR LIVE DATA</span>
                     </div>
                     <p class="ai-summary" id="ai-summary">
                         Đang phân tích dữ liệu danh mục và tin thị trường. Insight AI sẽ tự cập nhật khi chu kỳ nền hoàn tất.
@@ -140,9 +140,7 @@
                             <tr><th>TICKER</th><th>RISK</th><th class="text-right">SCORE</th></tr>
                         </thead>
                         <tbody id="ai-trends-body">
-                            <tr><td>VCB</td><td class="neutral">—</td><td class="text-right mono">—</td></tr>
-                            <tr><td>FPT</td><td class="neutral">—</td><td class="text-right mono">—</td></tr>
-                            <tr><td>HPG</td><td class="neutral">—</td><td class="text-right mono">—</td></tr>
+                            <tr><td colspan="3" class="text-right mono" style="text-align:center;color:var(--text-muted);">Connecting to live portfolio data</td></tr>
                         </tbody>
                     </table>
                     <div class="ai-confidence-bar">
@@ -174,8 +172,8 @@
                             <span class="metric-label">VAR (95%)</span>
                             <svg class="metric-icon-svg" width="20" height="20" fill="none" stroke="#E74C3C" stroke-width="2" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
                         </div>
-                        <div class="metric-big" id="m-var">4.2%</div>
-                        <div class="metric-delta up" id="m-var-delta">+0.4%</div>
+                        <div class="metric-big" id="m-var">—</div>
+                        <div class="metric-delta neutral" id="m-var-delta">WAITING FOR LIVE DATA</div>
                         <div class="spark-container"><canvas class="spark" id="spark-var"></canvas></div>
                     </div>
                     <div class="metric-card sharpe">
@@ -183,8 +181,8 @@
                             <span class="metric-label">SHARPE RATIO</span>
                             <svg class="metric-icon-svg" width="20" height="20" fill="none" stroke="#27AE60" stroke-width="2" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
                         </div>
-                        <div class="metric-big" id="m-sharpe">1.8</div>
-                        <div class="metric-sub optimal" id="m-sharpe-sub">Optimal</div>
+                        <div class="metric-big" id="m-sharpe">—</div>
+                        <div class="metric-sub fair" id="m-sharpe-sub">Waiting</div>
                         <div class="spark-container"><canvas class="spark" id="spark-sharpe"></canvas></div>
                     </div>
                     <div class="metric-card drawdown">
@@ -192,8 +190,8 @@
                             <span class="metric-label">MAX DRAWDOWN</span>
                             <svg class="metric-icon-svg" width="20" height="20" fill="none" stroke="#F39C12" stroke-width="2" viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
                         </div>
-                        <div class="metric-big" id="m-drawdown">12.5%</div>
-                        <div class="metric-sub monitor" id="m-drawdown-sub">Monitor</div>
+                        <div class="metric-big" id="m-drawdown">—</div>
+                        <div class="metric-sub monitor" id="m-drawdown-sub">Waiting</div>
                         <div class="spark-container"><canvas class="spark" id="spark-drawdown"></canvas></div>
                     </div>
                     <div class="metric-card beta">
@@ -201,8 +199,8 @@
                             <span class="metric-label">PORTFOLIO BETA</span>
                             <svg class="metric-icon-svg" width="20" height="20" fill="none" stroke="#3498DB" stroke-width="2" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                         </div>
-                        <div class="metric-big" id="m-beta">0.95</div>
-                        <div class="metric-sub stable" id="m-beta-sub">Stable</div>
+                        <div class="metric-big" id="m-beta">—</div>
+                        <div class="metric-sub stable" id="m-beta-sub">Waiting</div>
                         <div class="spark-container"><canvas class="spark" id="spark-beta"></canvas></div>
                     </div>
                 </div>
@@ -530,10 +528,10 @@
         </div>
     </div>
 
-    <script src="js/api.js?v=31"></script>
-    <script src="js/charts.js?v=31"></script>
-    <script src="js/components.js?v=31"></script>
-    <script src="js/firebase-auth.js?v=31"></script>
-    <script src="js/app.js?v=31"></script>
+    <script src="js/api.js?v=32"></script>
+    <script src="js/charts.js?v=32"></script>
+    <script src="js/components.js?v=32"></script>
+    <script src="js/firebase-auth.js?v=32"></script>
+    <script src="js/app.js?v=32"></script>
 </body>
 </html>

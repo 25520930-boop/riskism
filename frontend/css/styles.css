@@ -1722,6 +1722,7 @@ body.auth-active {
 }
 .status-dot.connected { background: var(--up); }
 .status-dot.disconnected { background: var(--down); }
+.status-dot.degraded { background: #F59E0B; }
 .status-text { font-size: 0.68rem; color: var(--text-muted); }
 .status-sep { color: var(--border); font-size: 0.7rem; }
 .kbd-hint { opacity: 0.6; }

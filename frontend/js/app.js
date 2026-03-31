@@ -1,6 +1,6 @@
 /**
  * Riskism — Main App Controller V3.1
- * Auto-loads all tabs with real data. No empty states.
+ * Auto-loads all tabs with real data and surfaces degraded states honestly.
  */
 class RiskismApp {
     constructor() {
@@ -16,6 +16,8 @@ class RiskismApp {
         this.authMode = 'signin';
         this._isLoadingData = false;
         this._bootstrapped = false;
+        this._noticeTimestamps = new Map();
+        this.lastSuccessfulDataSyncAt = null;
     }
 
     normalizeUserId(value) {
@@ -51,6 +53,74 @@ class RiskismApp {
             console.error(`[Bootstrap] ${label} failed:`, err);
             return Promise.resolve(null);
         }
+    }
+
+    notifyOnce(key, message, type = 'info', ttlMs = 45000) {
+        const now = Date.now();
+        const previous = this._noticeTimestamps.get(key) || 0;
+        if (now - previous < ttlMs) {
+            return;
+        }
+        this._noticeTimestamps.set(key, now);
+        UI.toast(message, type);
+    }
+
+    _formatSyncTime(value) {
+        const date = value instanceof Date ? value : new Date(value);
+        if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+            return '—';
+        }
+        return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    }
+
+    getStatusDetail(status) {
+        if (status === 'connected') {
+            return `Last update: ${this._formatSyncTime(this.lastSuccessfulDataSyncAt || new Date())}`;
+        }
+        if (status === 'degraded') {
+            if (this.lastSuccessfulDataSyncAt) {
+                return `Showing last successful snapshot from ${this._formatSyncTime(this.lastSuccessfulDataSyncAt)}`;
+            }
+            return 'Waiting for live backend response';
+        }
+        if (status === 'disconnected') {
+            return 'Realtime feed disconnected. Retrying...';
+        }
+        return 'Last update: —';
+    }
+
+    handleProtectedApiError(scope, error, options = {}) {
+        const {
+            retainSnapshot = true,
+            notifyKey = `${scope}-sync`,
+            withUiReset = false,
+            emptyMessage = 'Live data is temporarily unavailable. Please try again shortly.',
+        } = options;
+
+        const status = Number(error?.status || 0);
+        const detail = String(error?.detail || error?.message || emptyMessage);
+
+        if (status === 401) {
+            this.updateStatusBar('disconnected', 'Session expired. Please sign in again.');
+            this.notifyOnce('auth-expired', 'Session expired. Please sign in again.', 'error', 5000);
+            this.showLoginModal();
+            return;
+        }
+
+        this.updateStatusBar('degraded');
+        if (retainSnapshot && this.portfolioData) {
+            this.notifyOnce(
+                notifyKey,
+                `Live ${scope} sync is temporarily unavailable. Showing your last successful snapshot.`,
+                'error',
+            );
+            return;
+        }
+
+        if (withUiReset) {
+            UI.renderLiveSyncIssue(detail);
+        }
+        this.notifyOnce(notifyKey, detail, 'error');
     }
 
     async ensureExternalScript(key, src, isReady, timeoutMs = 8000) {
@@ -182,7 +252,7 @@ class RiskismApp {
 
         if (this._bootstrapped) {
             this.runBackgroundTask('Dashboard refresh', () => this.loadAllData());
-            this.updateStatusBar('connected');
+            this.updateStatusBar('degraded', 'Refreshing live workspace...');
             UI.toast(`Welcome back, ${this.username}! 🚀`, 'success');
             return;
         }
@@ -199,7 +269,9 @@ class RiskismApp {
         this.runSafely('Bind keyboard shortcuts', () => this.bindKeyboardShortcuts());
         this.runSafely('Init realtime feed', () => this.initRealtimeFeed());
         this.runSafely('Start clock', () => this.startClock());
-        this.updateStatusBar('connected');
+        UI.resetMetrics('CONNECTING TO LIVE DATA');
+        UI.showAIUnavailable('Connecting to live portfolio data...');
+        this.updateStatusBar('degraded', 'Connecting to live services...');
         this.runBackgroundTask('Load market ticker', () => this.loadMarketTicker());
         this.runBackgroundTask('Chart.js bootstrap', async () => {
             await this.ensureChartLibrary();
@@ -567,6 +639,9 @@ class RiskismApp {
                 api.triggerAgent(type),
                 120000
             );
+            if (result?.status === 'error') {
+                throw new Error(result.error || 'Agent run failed.');
+            }
             this.agentResult = result;
             if (result) {
                 this.applyAgentResult(result);
@@ -575,10 +650,17 @@ class RiskismApp {
             }
         } catch (e) {
             console.error('[Agent] Error:', e);
-            if (e.message && e.message.includes('429')) {
-                UI.toast('⏳ Rate limit reached. Please wait ~60s before running again.', 'error');
+            if (Number(e?.status || 0) === 429) {
+                UI.toast(e.detail || 'Rate limit reached. Please wait before running again.', 'error');
+            } else if (Number(e?.status || 0) === 401) {
+                this.handleProtectedApiError('agent', e, { retainSnapshot: true });
             } else {
-                UI.toast('❌ Agent error: ' + (e.message || 'timeout'), 'error');
+                this.updateStatusBar('degraded');
+                if (this.agentResult) {
+                    this.notifyOnce('agent-run-error', 'AI run failed. Keeping your last successful insight.', 'error');
+                } else {
+                    UI.toast(e?.detail || e?.message || 'AI run failed. Please try again.', 'error');
+                }
             }
         } finally {
             UI.hideLoading();
@@ -601,7 +683,7 @@ class RiskismApp {
         }
 
         // Update holdings with agent's data
-        const portfolio = r.portfolio || (this.portfolioData ? this.portfolioData.portfolio : api.getDemoPortfolio());
+        const portfolio = r.portfolio || this.portfolioData?.portfolio || { holdings: [], capital_amount: 0 };
         UI.updateHoldings(portfolio.holdings, stockRisks);
         window._cachedPortfolioSymbols = (portfolio.holdings || []).map(h => h.symbol);
 
@@ -926,6 +1008,7 @@ class RiskismApp {
 
     applyPortfolioSnapshot(port) {
         this.portfolioData = port;
+        this.lastSuccessfulDataSyncAt = new Date();
 
         const holdings = port?.portfolio?.holdings || [];
         const stockRisks = port?.stock_risks || {};
@@ -967,6 +1050,7 @@ class RiskismApp {
         UI.renderPortfolio(port);
         UI.setNotifications(anomalies);
         this.refreshNewsForCurrentPortfolio();
+        this.updateStatusBar('connected');
     }
 
     getChatContext() {
@@ -1029,12 +1113,26 @@ class RiskismApp {
         if (!this.isAuthenticated()) return;
 
         try {
-            const [insightPayload, predictionPayload, historyPayload, statusPayload] = await Promise.all([
+            const [insightResult, predictionResult, historyResult, statusResult] = await Promise.allSettled([
                 this._fetchWithTimeout(api.getInsights(), this.API_TIMEOUT),
                 this._fetchWithTimeout(api.getPredictions(), this.API_TIMEOUT),
                 this._fetchWithTimeout(api.getPredictionsHistory(), this.API_TIMEOUT),
                 this._fetchWithTimeout(api.getAgentStatus(), this.API_TIMEOUT),
             ]);
+
+            const insightPayload = insightResult.status === 'fulfilled' ? insightResult.value : null;
+            const predictionPayload = predictionResult.status === 'fulfilled' ? predictionResult.value : null;
+            const historyPayload = historyResult.status === 'fulfilled' ? historyResult.value : null;
+            const statusPayload = statusResult.status === 'fulfilled' ? statusResult.value : null;
+            const hadFailures = [insightResult, predictionResult, historyResult, statusResult].some(result => result.status === 'rejected');
+            const rejectionReasons = [insightResult, predictionResult, historyResult, statusResult]
+                .filter(result => result.status === 'rejected')
+                .map(result => result.reason);
+            const authFailure = rejectionReasons.find(reason => Number(reason?.status || 0) === 401);
+            if (authFailure) {
+                this.handleProtectedApiError('AI artifacts', authFailure, { retainSnapshot: true });
+                return;
+            }
 
             const latestInsight =
                 statusPayload?.last_run?.insight ||
@@ -1074,8 +1172,19 @@ class RiskismApp {
             if (statusPayload?.execution_log?.length) {
                 UI.renderAgentLog(statusPayload.execution_log);
             }
+            if (hadFailures && (latestInsight || latestReflection || this.agentResult)) {
+                this.notifyOnce(
+                    'agent-artifacts-sync',
+                    'Live AI artifact sync is temporarily unavailable. Keeping the latest successful results.',
+                    'info',
+                );
+                this.updateStatusBar('degraded');
+            } else if (hadFailures && rejectionReasons[0]) {
+                this.handleProtectedApiError('AI artifacts', rejectionReasons[0], { retainSnapshot: true });
+            }
         } catch (e) {
             console.warn('[Dashboard] Agent artifact load failed:', e.message);
+            this.handleProtectedApiError('AI artifacts', e, { retainSnapshot: true });
         }
     }
 
@@ -1107,10 +1216,17 @@ class RiskismApp {
             );
             if (port) {
                 this.applyPortfolioSnapshot(port);
+            } else {
+                throw new Error('Portfolio risk payload was empty.');
             }
             await this.loadLatestAgentArtifacts();
         } catch (e) {
             console.warn('[Dashboard] Portfolio load failed:', e.message);
+            this.handleProtectedApiError('portfolio', e, {
+                retainSnapshot: Boolean(this.portfolioData),
+                withUiReset: !this.portfolioData,
+                emptyMessage: 'Live portfolio data is temporarily unavailable. Please try again shortly.',
+            });
         } finally {
             await newsPromise.catch(() => null);
             this._isLoadingData = false;
@@ -1182,7 +1298,6 @@ class RiskismApp {
         setInterval(() => {
             if (!this.isAuthenticated()) return;
             this.loadAllData();
-            this.updateStatusBar('connected');
         }, 30000);
     }
 
@@ -1233,7 +1348,7 @@ class RiskismApp {
     }
 
     // ─── Status Bar ───────────────────────
-    updateStatusBar(status) {
+    updateStatusBar(status, detail = '') {
         const dot = document.getElementById('status-dot');
         const connEl = document.getElementById('status-connection');
         const updateEl = document.getElementById('status-last-update');
@@ -1241,11 +1356,15 @@ class RiskismApp {
             dot.className = `status-dot ${status}`;
         }
         if (connEl) {
-            const labels = { connected: 'API Connected', disconnected: 'Disconnected', demo: 'Demo Mode' };
+            const labels = {
+                connected: 'Live Data Connected',
+                disconnected: 'Disconnected',
+                degraded: 'Live Sync Degraded',
+            };
             connEl.textContent = labels[status] || status;
         }
         if (updateEl) {
-            updateEl.textContent = `Last update: ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`;
+            updateEl.textContent = detail || this.getStatusDetail(status);
         }
     }
 }

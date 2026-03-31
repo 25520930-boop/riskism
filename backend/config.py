@@ -27,6 +27,9 @@ class Settings(BaseSettings):
 
     # Gemini AI
     gemini_api_key: str = ""
+    gemini_fast_models: str = "gemini-2.5-flash,gemini-2.0-flash"
+    gemini_reasoning_models: str = "gemini-2.5-pro,gemini-2.5-flash,gemini-2.0-flash"
+    gemini_fallback_models: str = "gemini-2.5-flash,gemini-2.0-flash"
 
     # Firebase Auth
     firebase_project_id: str = ""

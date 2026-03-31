@@ -615,6 +615,7 @@ async def health_check():
                 "misses": agent.llm._cache_misses,
                 "hit_rate": f"{agent.llm._cache_hits / max(1, agent.llm._cache_hits + agent.llm._cache_misses) * 100:.1f}%",
             },
+            "llm_runtime": agent.llm.runtime_status(),
             "market_data_cache": len(vnstock._memory_cache),
         },
     }
@@ -1276,38 +1277,11 @@ async def update_portfolio(
         db.rollback()
         if isinstance(e, HTTPException):
             raise e
-        print(f"[PORTFOLIO FALLBACK] DB error, mock success: {e}")
-        
-        # MOCK PORTFOLIO IN AGENT STATE for demonstration
-        agent.state['mock_portfolio'] = {
-            'risk_appetite': 'moderate',
-            'capital_amount': request.capital_amount,
-            'holdings': [
-                {
-                    'symbol': h.symbol.upper(),
-                    'quantity': h.quantity,
-                    'avg_price': float((await _get_stock_reference_snapshot(h.symbol.upper()) or {}).get('price') or 0),
-                    'sector': SECTOR_MAP.get(h.symbol.upper(), 'Unknown')
-                }
-                for h in request.holdings if h.quantity > 0
-            ]
-        }
-        
-        queued = await _queue_agent_analysis(
-            user_id,
-            'morning',
-            trigger_source='portfolio_update',
-            delay_seconds=1,
-            force=True,
+        print(f"[PORTFOLIO ERROR] Failed to persist portfolio update for user {user_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save portfolio right now. Please try again shortly.",
         )
-        return {
-            "status": "success",
-            "demo_mode": True,
-            "automation": {
-                "queued": queued,
-                "analysis_type": "morning",
-            },
-        }
     finally:
         db.close()
 

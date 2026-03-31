@@ -11,6 +11,16 @@ const WS_BASE = window.location.hostname === 'localhost'
     ? 'ws://localhost:8000'
     : `ws://${window.location.host}`;
 
+class RiskismAPIError extends Error {
+    constructor(message, status = 0, detail = '', endpoint = '') {
+        super(message);
+        this.name = 'RiskismAPIError';
+        this.status = status;
+        this.detail = detail || message;
+        this.endpoint = endpoint;
+    }
+}
+
 class RiskismAPI {
     constructor() {
         this.ws = null;
@@ -18,7 +28,6 @@ class RiskismAPI {
         this.onPriceUpdate = null;
         this.onAgentResult = null;
         this.onConnectionChange = null;
-        this.demoMode = true; // Fallback to demo when backend is unavailable
         this.REQUEST_TIMEOUT = 8000;
         this.accessToken = window.localStorage.getItem('riskism_access_token') || '';
     }
@@ -62,30 +71,54 @@ class RiskismAPI {
         }
     }
 
+    _buildApiError(endpoint, status, payload, fallbackMessage = '') {
+        const detail = payload?.detail || fallbackMessage || `HTTP ${status}`;
+        return new RiskismAPIError(detail, status, detail, endpoint);
+    }
+
+    async requestJson(endpoint, options = {}, timeoutMs = this.REQUEST_TIMEOUT) {
+        try {
+            const res = await this.fetchWithTimeout(`${API_BASE}${endpoint}`, options, timeoutMs);
+            const payload = await res.json().catch(() => null);
+            if (res.status === 401) this.clearAccessToken();
+            if (!res.ok) {
+                throw this._buildApiError(endpoint, res.status, payload);
+            }
+            return payload;
+        } catch (err) {
+            if (err instanceof RiskismAPIError) {
+                throw err;
+            }
+            if (err?.name === 'AbortError') {
+                throw new RiskismAPIError('Request timed out.', 0, 'Request timed out.', endpoint);
+            }
+            throw new RiskismAPIError(
+                err?.message || 'Network error. Please try again.',
+                0,
+                'Network error. Please try again.',
+                endpoint,
+            );
+        }
+    }
+
     async get(endpoint) {
         try {
-            const res = await this.fetchWithTimeout(`${API_BASE}${endpoint}`);
-            if (res.status === 401) this.clearAccessToken();
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return await res.json();
+            return await this.requestJson(endpoint);
         } catch (err) {
-            console.warn(`[API] GET ${endpoint} failed:`, err.message);
+            console.warn(`[API] GET ${endpoint} failed:`, err.detail || err.message);
             return null;
         }
     }
 
     async post(endpoint, data) {
         try {
-            const res = await this.fetchWithTimeout(`${API_BASE}${endpoint}`, {
+            return await this.requestJson(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data),
             });
-            if (res.status === 401) this.clearAccessToken();
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return await res.json();
         } catch (err) {
-            console.warn(`[API] POST ${endpoint} failed:`, err.message);
+            console.warn(`[API] POST ${endpoint} failed:`, err.detail || err.message);
             return null;
         }
     }
@@ -226,16 +259,12 @@ class RiskismAPI {
 
     async getPortfolio() {
         if (!this.hasAccessToken()) return null;
-        const data = await this.get('/api/portfolio');
-        if (data) return data;
-        return this.hasAccessToken() ? this.getDemoPortfolio() : null;
+        return await this.requestJson('/api/portfolio');
     }
 
     async getPortfolioRisk() {
         if (!this.hasAccessToken()) return null;
-        const data = await this.get('/api/portfolio/risk');
-        if (data) return data;
-        return this.hasAccessToken() ? this.getDemoPortfolioRisk() : null;
+        return await this.requestJson('/api/portfolio/risk');
     }
 
     async updatePortfolio(capital, holdings) {
@@ -258,15 +287,21 @@ class RiskismAPI {
             }
             return data;
         } catch (err) {
-            console.warn('[API] POST /api/portfolio/update failed:', err.message);
-            return null;
+            const detail = err instanceof RiskismAPIError
+                ? err.detail
+                : (err?.message || 'Network error. Please try again.');
+            console.warn('[API] POST /api/portfolio/update failed:', detail);
+            return {
+                status: 'error',
+                detail,
+            };
         }
     }
 
     // ─── Insights & News ─────────────────────────────────
 
     async getInsights() {
-        return await this.get('/api/insights');
+        return await this.requestJson('/api/insights');
     }
 
     async getNews(limit = 8) {
@@ -277,46 +312,34 @@ class RiskismAPI {
     // ─── Agent ───────────────────────────────────────────
 
     async triggerAgent(type = 'morning', symbol = null) {
-        try {
-            const res = await this.fetchWithTimeout(`${API_BASE}/api/agent/trigger`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ analysis_type: type, symbol }),
-            }, 120000);
-            if (res.status === 401) {
-                this.clearAccessToken();
-                throw new Error('401: Unauthorized');
-            }
-            if (res.status === 429) {
-                const err = await res.json();
-                throw new Error(`429: ${err.detail || 'Rate limit exceeded'}`);
-            }
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return await res.json();
-        } catch (err) {
-            if (err.message.startsWith('429') || err.message.startsWith('401')) throw err;
-            console.warn('[API] Agent trigger failed:', err.message);
-            return this.getDemoAgentResult();
-        }
+        return await this.requestJson('/api/agent/trigger', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ analysis_type: type, symbol }),
+        }, 120000);
     }
 
     async getAgentStatus() {
-        return await this.get('/api/agent/status');
+        return await this.requestJson('/api/agent/status');
     }
 
     async getPredictions() {
-        return await this.get('/api/predictions');
+        return await this.requestJson('/api/predictions');
     }
 
     async getPredictionsHistory(limit = 10) {
-        return await this.get(`/api/predictions/history?limit=${limit}`);
+        return await this.requestJson(`/api/predictions/history?limit=${limit}`);
     }
 
     async chatAssistant(message, history = [], appContext = {}) {
-        return await this.post('/api/chat', {
+        return await this.requestJson('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
             message: message,
             history: history,
             app_context: appContext,
+            }),
         });
     }
 
@@ -330,7 +353,6 @@ class RiskismAPI {
 
             this.ws.onopen = () => {
                 console.log('[WS] Connected');
-                this.demoMode = false;
                 if (this.onConnectionChange) this.onConnectionChange('connected');
             };
 
@@ -355,15 +377,13 @@ class RiskismAPI {
             };
 
             this.ws.onerror = () => {
-                console.warn('[WS] Connection error, falling back to demo mode');
-                this.demoMode = true;
-                if (this.onConnectionChange) this.onConnectionChange('demo');
+                console.warn('[WS] Connection error, realtime feed degraded');
+                if (this.onConnectionChange) this.onConnectionChange('degraded');
             };
 
         } catch (err) {
             console.warn('[WS] Failed to connect:', err);
-            this.demoMode = true;
-            if (this.onConnectionChange) this.onConnectionChange('demo');
+            if (this.onConnectionChange) this.onConnectionChange('degraded');
         }
     }
 

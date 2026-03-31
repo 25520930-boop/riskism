@@ -1,6 +1,6 @@
 /**
  * Riskism — Chart Components (Sparklines) V3.0
- * Fixed: proper canvas sizing, data normalization, fallback sparklines.
+ * Fixed: proper canvas sizing, data normalization, neutral no-data placeholders.
  */
 class RiskismCharts {
     constructor() {
@@ -30,8 +30,7 @@ class RiskismCharts {
 
         // Ensure we have valid data
         if (!data || !Array.isArray(data) || data.length < 2) {
-            // Generate smooth demo curve as fallback
-            data = this._generateSmoothCurve(30, canvasId);
+            data = this._placeholderSeries();
         }
 
         if (this.sparkCharts[canvasId]) {
@@ -84,7 +83,7 @@ class RiskismCharts {
     drawAllSparklines(history) {
         this._lastHistory = history || null;
         if (!history) {
-            // Draw demo sparklines when no data
+            // Keep charts visually calm when live history is unavailable.
             this.drawSparkline('spark-var', null, '#DC2626');
             this.drawSparkline('spark-sharpe', null, '#16A34A');
             this.drawSparkline('spark-drawdown', null, '#F59E0B');
@@ -99,24 +98,8 @@ class RiskismCharts {
         this.drawSparkline('spark-beta', history.beta, '#3B82F6');
     }
 
-    _generateSmoothCurve(points, seed) {
-        // Generate a smooth, realistic-looking curve for demo
-        const seedNum = typeof seed === 'string'
-            ? seed.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
-            : seed;
-        
-        const data = [];
-        let value = 50 + (seedNum % 30);
-        const amplitude = 5 + (seedNum % 10);
-        
-        for (let i = 0; i < points; i++) {
-            // Sine wave with gentle noise
-            const wave = Math.sin(i / (3 + (seedNum % 3))) * amplitude;
-            const noise = (Math.sin(seedNum + i * 7.3) * 0.5 + Math.sin(seedNum + i * 13.7) * 0.3) * amplitude * 0.3;
-            value = 50 + wave + noise + (seedNum % 20) - 10;
-            data.push(Math.round(value * 100) / 100);
-        }
-        return data;
+    _placeholderSeries() {
+        return [0, 0];
     }
 }
 const charts = new RiskismCharts();
