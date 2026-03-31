@@ -253,7 +253,7 @@ class VnstockClient:
 
     def get_market_index_snapshot(self) -> Optional[Dict]:
         """Get latest VN-Index snapshot with short cache for ticker usage."""
-        cache_key = "vnindex:snapshot"
+        cache_key = "vnindex:snapshot:live-v2"
         cached = self._get_cache(cache_key)
         if cached:
             return json.loads(cached)
@@ -262,27 +262,51 @@ class VnstockClient:
             return None
 
         try:
-            historical = self.get_market_index(days=5)
-            closes = historical.get('close', []) if historical else []
-            volumes = historical.get('volume', []) if historical else []
-            if not closes:
+            today = datetime.now().strftime('%Y-%m-%d')
+            lookback = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
+            index_quote = self._get_stock('VNINDEX', 'VCI').quote
+
+            intraday_df = index_quote.history(start=today, end=today, interval='1m')
+            daily_df = index_quote.history(start=lookback, end=today, interval='1D')
+
+            latest_price = None
+            latest_volume = 0
+            if intraday_df is not None and not intraday_df.empty and 'close' in intraday_df.columns:
+                latest_price = float(intraday_df.iloc[-1]['close'])
+
+            if daily_df is None or daily_df.empty or 'close' not in daily_df.columns:
                 return None
 
-            latest_close = float(closes[-1])
-            previous_close = float(closes[-2]) if len(closes) > 1 else latest_close
-            latest_volume = int(volumes[-1]) if volumes else 0
-            change = latest_close - previous_close
+            daily_closes = [float(v) for v in daily_df['close'].tolist()]
+            daily_times = daily_df['time'].tolist() if 'time' in daily_df.columns else []
+            latest_daily_date = str(daily_times[-1])[:10] if daily_times else today
+
+            if latest_price is None:
+                latest_price = daily_closes[-1]
+
+            if len(daily_closes) >= 2:
+                if latest_daily_date == today:
+                    previous_close = daily_closes[-2]
+                else:
+                    previous_close = daily_closes[-1]
+            else:
+                previous_close = latest_price
+
+            if 'volume' in daily_df.columns and not daily_df.empty:
+                latest_volume = int(float(daily_df.iloc[-1]['volume']))
+
+            change = latest_price - previous_close
 
             result = {
                 'symbol': 'VNINDEX',
-                'price': latest_close,
+                'price': round(latest_price, 2),
                 'previous_close': previous_close,
                 'change': round(change, 2),
                 'change_pct': round((change / previous_close) * 100, 2) if previous_close > 0 else 0,
                 'volume': latest_volume,
                 'timestamp': datetime.now().isoformat(),
             }
-            self._set_cache(cache_key, json.dumps(result), 30)
+            self._set_cache(cache_key, json.dumps(result), 10)
             return result
 
         except Exception as e:

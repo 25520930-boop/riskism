@@ -1001,7 +1001,15 @@ class RiskismApp {
         update();
         setInterval(update, 1000);
 
-        // Realtime Polling (Every 30s)
+        if (this.tickerInterval) {
+            clearInterval(this.tickerInterval);
+        }
+        this.tickerInterval = setInterval(() => {
+            if (!this.isAuthenticated()) return;
+            this.loadMarketTicker();
+        }, 15000);
+
+        // Dashboard polling (Every 30s)
         setInterval(() => {
             if (!this.isAuthenticated()) return;
             this.loadAllData();

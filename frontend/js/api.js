@@ -164,13 +164,14 @@ class RiskismAPI {
     }
 
     async getMarketIndexSnapshot() {
+        const live = await this.getLatestPrice('VNINDEX');
+        if (live && Number.isFinite(Number(live.change_pct))) {
+            return live;
+        }
+
         const history = await this.get('/api/market/VNINDEX?days=2');
         const closes = history?.close || [];
         if (!Array.isArray(closes) || closes.length === 0) {
-            const live = await this.getLatestPrice('VNINDEX');
-            if (live && Number.isFinite(Number(live.change_pct))) {
-                return live;
-            }
             return null;
         }
 
