@@ -3,13 +3,32 @@
  * Handles all HTTP and WebSocket communication with the backend.
  */
 
-const API_BASE = window.location.hostname === 'localhost' 
-    ? 'http://localhost:8000' 
-    : '';
+const readRuntimeConfig = (key) => {
+    const fromWindow = window.__RISKISM_CONFIG__?.[key];
+    if (typeof fromWindow === 'string' && fromWindow.trim()) {
+        return fromWindow.trim();
+    }
+    const meta = document.querySelector(`meta[name="riskism-${key.replace(/[A-Z]/g, match => `-${match.toLowerCase()}`)}"]`);
+    return meta?.content?.trim?.() || '';
+};
 
-const WS_BASE = window.location.hostname === 'localhost'
-    ? 'ws://localhost:8000'
-    : `ws://${window.location.host}`;
+const trimTrailingSlash = (value) => String(value || '').trim().replace(/\/+$/, '');
+
+const API_BASE = trimTrailingSlash(readRuntimeConfig('apiBase'));
+
+const resolveWsBase = () => {
+    const configured = trimTrailingSlash(readRuntimeConfig('wsBase'));
+    if (configured) {
+        return configured;
+    }
+    if (/^https?:\/\//i.test(API_BASE)) {
+        return API_BASE.replace(/^http/i, 'ws');
+    }
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${wsProtocol}//${window.location.host}`;
+};
+
+const WS_BASE = resolveWsBase();
 
 class RiskismAPIError extends Error {
     constructor(message, status = 0, detail = '', endpoint = '') {

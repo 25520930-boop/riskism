@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     app_secret_key: str = "change-me-in-production"
     secret_key: str = ""
     debug: bool = True
+    expose_internal_errors: bool = False
 
     # PostgreSQL
     postgres_host: str = "localhost"

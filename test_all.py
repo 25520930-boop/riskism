@@ -680,9 +680,41 @@ except Exception as e:
     print(f"  ❌ FAIL: {e}")
 
 
+# ─── TEST 13: Deploy Config & Observability Contract ─────
+print("\n🛰️ Test 13: Deploy config & observability")
+try:
+    main_source = (repo_root / 'backend' / 'main.py').read_text()
+    config_source = (repo_root / 'backend' / 'config.py').read_text()
+    env_source = (repo_root / '.env.example').read_text()
+    api_source = (repo_root / 'frontend' / 'js' / 'api.js').read_text()
+    index_source = (repo_root / 'frontend' / 'index.html').read_text()
+    nginx_source = (repo_root / 'nginx.conf').read_text()
+    compose_source = (repo_root / 'docker-compose.yml').read_text()
+
+    assert '@app.get("/api/health/live")' in main_source, "Thiếu liveness endpoint /api/health/live"
+    assert '@app.get("/api/health/ready")' in main_source, "Thiếu readiness endpoint /api/health/ready"
+    assert 'X-Request-ID' in main_source and 'X-Process-Time-Ms' in main_source, "Backend phải gắn request tracing headers"
+    assert 'content={"detail": str(exc), "type": type(exc).__name__}' not in main_source, "Global error handler không được leak raw exception ra client"
+    assert 'expose_internal_errors' in config_source and 'EXPOSE_INTERNAL_ERRORS=' in env_source, "Config phải có cờ expose_internal_errors"
+    assert "http://localhost:8000" not in api_source and "ws://localhost:8000" not in api_source, "Frontend không được hardcode localhost backend nữa"
+    assert 'riskism-api-base' in index_source and 'riskism-ws-base' in index_source, "Frontend phải có runtime config hooks cho API/WS base"
+    assert 'wss:' in api_source and 'window.location.host' in api_source, "WebSocket base phải protocol-safe cho HTTPS"
+    assert 'proxy_set_header X-Request-ID $request_id;' in nginx_source, "Nginx phải forward X-Request-ID vào backend"
+    assert 'healthcheck:' in compose_source and '/api/health/live' in compose_source, "docker-compose phải có backend healthcheck thật"
+    print("  ✅ Backend observability: request tracing + safe error handling + live/ready healthcheck")
+    print("  ✅ Frontend/proxy deploy config: bỏ hardcode localhost, dùng runtime config + request-id forwarding")
+
+    passed += 1
+    print("  ✅ PASS — Deploy config & observability contract đã được khóa!")
+
+except Exception as e:
+    errors.append(f"Deploy Config/Observability: {e}")
+    print(f"  ❌ FAIL: {e}")
+
+
 # ─── KẾT QUẢ TỔNG ────────────────────────────────────────
 print("\n" + "=" * 60)
-print(f"📊 KẾT QUẢ: {passed}/12 tests PASSED")
+print(f"📊 KẾT QUẢ: {passed}/13 tests PASSED")
 if errors:
     print(f"❌ LỖI ({len(errors)}):")
     for e in errors:

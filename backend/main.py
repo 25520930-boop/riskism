@@ -10,6 +10,8 @@ import re
 import hmac
 import hashlib
 import secrets
+import logging
+import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -26,9 +28,10 @@ from backend.database import SyncSessionLocal
 
 from backend.config import get_settings
 from backend.agent.orchestrator import AgentOrchestrator
-from backend.data.vnstock_client import VnstockClient
+from backend.data.vnstock_client import VnstockClient, VNSTOCK_AVAILABLE, VNSTOCK_BACKEND
 from backend.firebase_auth import get_firebase_public_config, verify_firebase_id_token
 from backend.risk_engine.capital_aware import SECTOR_MAP
+import redis
 
 try:
     from slowapi import Limiter
@@ -41,6 +44,11 @@ except ImportError:
     SLOWAPI_AVAILABLE = False
 
 settings = get_settings()
+logging.basicConfig(
+    level=logging.DEBUG if settings.debug else logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("riskism.api")
 
 PASSWORD_ITERATIONS = 310000
 PASSWORD_MIN_LENGTH = 8
@@ -69,6 +77,7 @@ auto_agent_state = defaultdict(_default_auto_agent_state)
 AGENT_AUTOMATION_COOLDOWN_SECONDS = 90
 AUTO_MORNING_START_MINUTES = 8 * 60 + 30
 AUTO_AFTERNOON_START_MINUTES = 15 * 60 + 30
+APP_STARTED_AT = _time.time()
 
 
 # WebSocket connection manager
@@ -113,6 +122,7 @@ app = FastAPI(
     description="🔷 Vietnamese Stock Market Risk Assessment Platform V3.0",
     version="3.0.0",
     lifespan=lifespan,
+    debug=settings.debug,
 )
 
 app.add_middleware(
@@ -143,23 +153,53 @@ if SLOWAPI_AVAILABLE and RateLimitExceeded is not None:
 
 @app.middleware("http")
 async def fallback_rate_limit_middleware(request: Request, call_next):
-    if SLOWAPI_AVAILABLE:
-        return await call_next(request)
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    started = _time.perf_counter()
 
-    limiter_for_request = _fallback_rate_limiter_for_request(request)
-    client_ip = request.client.host if request.client else "unknown"
-    if not limiter_for_request.is_allowed(client_ip):
-        return _rate_limit_response(limiter_for_request.retry_after(client_ip))
-    return await call_next(request)
+    if SLOWAPI_AVAILABLE:
+        response = await call_next(request)
+    else:
+        limiter_for_request = _fallback_rate_limiter_for_request(request)
+        client_ip = request.client.host if request.client else "unknown"
+        if not limiter_for_request.is_allowed(client_ip):
+            response = _rate_limit_response(limiter_for_request.retry_after(client_ip))
+        else:
+            response = await call_next(request)
+
+    elapsed_ms = (_time.perf_counter() - started) * 1000
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.1f}"
+    logger.info(
+        "%s %s -> %s [%s] %.1fms",
+        request.method,
+        request.url.path,
+        response.status_code,
+        request_id,
+        elapsed_ms,
+    )
+    return response
 
 
 # ─── Global Error Handler ────────────────────────────────
 @app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    print(f"[ERROR] Unhandled exception: {exc}")
+async def global_exception_handler(request: Request, exc: Exception):
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+    logger.exception(
+        "Unhandled exception on %s %s [%s]",
+        request.method,
+        request.url.path,
+        request_id,
+    )
+    detail = (
+        str(exc)
+        if settings.expose_internal_errors
+        else "Internal server error. Please try again shortly."
+    )
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc), "type": type(exc).__name__},
+        content={"detail": detail, "request_id": request_id},
+        headers={"X-Request-ID": request_id},
     )
 
 
@@ -589,36 +629,104 @@ async def agent_automation_loop():
 
 # ─── API ROUTES ──────────────────────────────────────────
 
-@app.get("/api/health")
-async def health_check():
-    """System health with diagnostics."""
-    # Check DB connectivity
-    db_ok = False
+def _get_request_id(request: Request) -> str:
+    return getattr(request.state, "request_id", request.headers.get("X-Request-ID", ""))
+
+
+def _check_database_health() -> Dict:
+    db = None
     try:
         db = SyncSessionLocal()
         db.execute(text("SELECT 1"))
-        db_ok = True
-        db.close()
+        return {"status": "connected", "ok": True}
     except Exception:
-        pass
+        return {"status": "unreachable", "ok": False}
+    finally:
+        if db:
+            db.close()
+
+
+def _check_cache_health() -> Dict:
+    client = None
+    try:
+        client = redis.Redis(
+            host=settings.redis_host,
+            port=settings.redis_port,
+            decode_responses=True,
+            socket_timeout=2,
+            socket_connect_timeout=2,
+        )
+        client.ping()
+        return {"status": "connected", "ok": True}
+    except Exception:
+        return {"status": "unreachable", "ok": False}
+    finally:
+        if client:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
+def _health_snapshot() -> Dict:
+    db_health = _check_database_health()
+    cache_health = _check_cache_health()
+    llm_runtime = agent.llm.runtime_status()
+    llm_status = "ready" if llm_runtime.get("status") == "ready" else "degraded"
+    core_ready = db_health["ok"] and cache_health["ok"]
 
     return {
-        "status": "healthy",
         "service": "Riskism API V3.1",
         "timestamp": datetime.now().isoformat(),
+        "uptime_seconds": int(max(0, _time.time() - APP_STARTED_AT)),
+        "status": "healthy" if core_ready else "degraded",
+        "ready": core_ready,
+        "checks": {
+            "database": db_health["status"],
+            "cache": cache_health["status"],
+            "vnstock_backend": VNSTOCK_BACKEND or "unavailable",
+            "vnstock_available": VNSTOCK_AVAILABLE,
+            "llm": llm_status,
+        },
         "diagnostics": {
-            "database": "connected" if db_ok else "unreachable",
-            "vnstock": "available" if vnstock._stock_cache is not None else "unavailable",
             "llm_cache": {
                 "size": agent.llm._cache.size,
                 "hits": agent.llm._cache_hits,
                 "misses": agent.llm._cache_misses,
                 "hit_rate": f"{agent.llm._cache_hits / max(1, agent.llm._cache_hits + agent.llm._cache_misses) * 100:.1f}%",
             },
-            "llm_runtime": agent.llm.runtime_status(),
+            "llm_runtime": llm_runtime,
             "market_data_cache": len(vnstock._memory_cache),
         },
     }
+
+
+@app.get("/api/health/live")
+async def liveness_check(request: Request):
+    return {
+        "status": "live",
+        "service": "Riskism API V3.1",
+        "timestamp": datetime.now().isoformat(),
+        "uptime_seconds": int(max(0, _time.time() - APP_STARTED_AT)),
+        "request_id": _get_request_id(request),
+    }
+
+
+@app.get("/api/health/ready")
+async def readiness_check(request: Request):
+    snapshot = _health_snapshot()
+    snapshot["request_id"] = _get_request_id(request)
+    status_code = 200 if snapshot["ready"] else 503
+    return JSONResponse(status_code=status_code, content=snapshot)
+
+
+@app.get("/api/health")
+async def health_check(request: Request):
+    """System health with diagnostics."""
+    snapshot = _health_snapshot()
+    snapshot["request_id"] = _get_request_id(request)
+    status_code = 200 if snapshot["ready"] else 503
+    return JSONResponse(status_code=status_code, content=snapshot)
 
 
 # --- Auth ---
