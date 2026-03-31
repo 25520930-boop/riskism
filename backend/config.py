@@ -2,6 +2,7 @@
 Riskism Backend Configuration
 """
 import os
+from typing import List
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -14,6 +15,8 @@ class Settings(BaseSettings):
     secret_key: str = ""
     debug: bool = True
     expose_internal_errors: bool = False
+    cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000"
+    trusted_hosts: str = "localhost,127.0.0.1"
 
     # PostgreSQL
     postgres_host: str = "localhost"
@@ -28,9 +31,9 @@ class Settings(BaseSettings):
 
     # Gemini AI
     gemini_api_key: str = ""
-    gemini_fast_models: str = "gemini-2.5-flash,gemini-2.0-flash"
-    gemini_reasoning_models: str = "gemini-2.5-pro,gemini-2.5-flash,gemini-2.0-flash"
-    gemini_fallback_models: str = "gemini-2.5-flash,gemini-2.0-flash"
+    gemini_fast_models: str = "gemini-2.0-flash,gemini-1.5-flash"
+    gemini_reasoning_models: str = "gemini-2.0-flash,gemini-1.5-flash"
+    gemini_fallback_models: str = "gemini-2.0-flash,gemini-1.5-flash"
 
     # Firebase Auth
     firebase_project_id: str = ""
@@ -67,6 +70,25 @@ class Settings(BaseSettings):
     @property
     def jwt_secret_key(self) -> str:
         return self.secret_key or self.app_secret_key
+
+    @staticmethod
+    def _csv_list(value: str) -> List[str]:
+        return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+    @property
+    def cors_allowed_origin_list(self) -> List[str]:
+        origins = self._csv_list(self.cors_allowed_origins)
+        return origins or [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:8000",
+            "http://127.0.0.1:8000",
+        ]
+
+    @property
+    def trusted_host_list(self) -> List[str]:
+        hosts = self._csv_list(self.trusted_hosts)
+        return hosts or ["localhost", "127.0.0.1"]
 
     class Config:
         env_file = ".env"

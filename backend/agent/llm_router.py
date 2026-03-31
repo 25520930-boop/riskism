@@ -30,9 +30,9 @@ class LLMRouter:
             self.client = genai.Client(api_key=settings.gemini_api_key)
 
         self.model_sequences = {
-            "fast": self._parse_model_list(settings.gemini_fast_models, ["gemini-2.5-flash", "gemini-2.0-flash"]),
-            "reasoning": self._parse_model_list(settings.gemini_reasoning_models, ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]),
-            "fallback": self._parse_model_list(settings.gemini_fallback_models, ["gemini-2.5-flash", "gemini-2.0-flash"]),
+            "fast": self._parse_model_list(settings.gemini_fast_models, ["gemini-2.0-flash", "gemini-1.5-flash"]),
+            "reasoning": self._parse_model_list(settings.gemini_reasoning_models, ["gemini-2.0-flash", "gemini-1.5-flash"]),
+            "fallback": self._parse_model_list(settings.gemini_fallback_models, ["gemini-2.0-flash", "gemini-1.5-flash"]),
         }
         self._last_error_detail = ""
         self._last_error_type = "ok"

@@ -196,12 +196,14 @@ class RiskismAPI {
 
     async getMarketData(symbol, days = 180) {
         const data = await this.get(`/api/market/${symbol}?days=${days}`);
-        return data || this.getDemoMarketData(symbol, days);
+        if (!data) console.warn(`[API] getMarketData(${symbol}) returned null — backend may be down`);
+        return data;
     }
 
     async getStockRisk(symbol) {
         const data = await this.get(`/api/market/${symbol}/risk`);
-        return data || this.getDemoRiskData(symbol);
+        if (!data) console.warn(`[API] getStockRisk(${symbol}) returned null — backend may be down`);
+        return data;
     }
 
     async getLatestPrice(symbol) {
@@ -355,9 +357,9 @@ class RiskismAPI {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-            message: message,
-            history: history,
-            app_context: appContext,
+                message: message,
+                history: history,
+                app_context: appContext,
             }),
         });
     }
@@ -368,7 +370,13 @@ class RiskismAPI {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
 
         try {
-            this.ws = new WebSocket(`${WS_BASE}/ws/prices`);
+            // Pass JWT token as query param so backend can identify the user
+            // and route agent_result only to the correct session
+            let wsUrl = `${WS_BASE}/ws/prices`;
+            if (this.accessToken) {
+                wsUrl += `?token=${encodeURIComponent(this.accessToken)}`;
+            }
+            this.ws = new WebSocket(wsUrl);
 
             this.ws.onopen = () => {
                 console.log('[WS] Connected');
@@ -406,7 +414,9 @@ class RiskismAPI {
         }
     }
 
-    // ─── Demo Data (Fallback) ────────────────────────────
+    // ─── Demo Data (LEGACY — no longer used as silent fallback) ──
+    // These methods are retained for manual testing only.
+    // Frontend now surfaces real errors instead of masking them.
 
     getDemoMarketData(symbol, days) {
         const seed = symbol.charCodeAt(0) + symbol.charCodeAt(1);
@@ -422,13 +432,13 @@ class RiskismAPI {
             const d = new Date();
             d.setDate(d.getDate() - (days - i));
             dates.push(d.toISOString().split('T')[0]);
-            
+
             const ret = (Math.random() - 0.48) * 0.036;
             price = price * (1 + ret);
             const o = price * (1 + (Math.random() - 0.5) * 0.01);
             const h = Math.max(o, price) * (1 + Math.random() * 0.015);
             const l = Math.min(o, price) * (1 - Math.random() * 0.015);
-            
+
             open.push(Math.round(o));
             high.push(Math.round(h));
             low.push(Math.round(l));

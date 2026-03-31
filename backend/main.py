@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from jose import JWTError, jwt
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from sqlalchemy import text
 from backend.database import SyncSessionLocal
 
@@ -49,6 +50,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("riskism.api")
+audit_logger = logging.getLogger("riskism.audit")
 
 PASSWORD_ITERATIONS = 310000
 PASSWORD_MIN_LENGTH = 8
@@ -80,25 +82,38 @@ AUTO_AFTERNOON_START_MINUTES = 15 * 60 + 30
 APP_STARTED_AT = _time.time()
 
 
-# WebSocket connection manager
+# WebSocket connection manager (user-aware)
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        self._ws_user_map: Dict[WebSocket, Optional[int]] = {}
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket, user_id: Optional[int] = None):
         await websocket.accept()
         self.active_connections.append(websocket)
+        self._ws_user_map[websocket] = user_id
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+        self._ws_user_map.pop(websocket, None)
 
     async def broadcast(self, data: dict):
+        """Broadcast to ALL connections (used for public price data)."""
         for connection in list(self.active_connections):
             try:
                 await connection.send_json(data)
             except Exception:
                 self.disconnect(connection)
+
+    async def send_to_user(self, user_id: int, data: dict):
+        """Send data only to connections belonging to a specific user."""
+        for connection in list(self.active_connections):
+            if self._ws_user_map.get(connection) == user_id:
+                try:
+                    await connection.send_json(data)
+                except Exception:
+                    self.disconnect(connection)
 
 ws_manager = ConnectionManager()
 
@@ -126,11 +141,16 @@ app = FastAPI(
 )
 
 app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=settings.trusted_host_list,
+)
+
+app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.cors_allowed_origin_list,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
 
 
@@ -548,7 +568,7 @@ async def _execute_agent_analysis(
         state['running'] = None
         agent.state['latest_agent_result'] = result
 
-    await ws_manager.broadcast({
+    await ws_manager.send_to_user(user_id, {
         'type': 'agent_result',
         'data': result,
         'timestamp': datetime.now().isoformat(),
@@ -631,6 +651,54 @@ async def agent_automation_loop():
 
 def _get_request_id(request: Request) -> str:
     return getattr(request.state, "request_id", request.headers.get("X-Request-ID", ""))
+
+
+def _get_client_ip(request: Optional[Request]) -> str:
+    if request is None:
+        return "unknown"
+    forwarded_for = request.headers.get("X-Forwarded-For", "")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _audit_log(
+    request: Optional[Request],
+    action: str,
+    outcome: str,
+    *,
+    user_id: Optional[int] = None,
+    username: Optional[str] = None,
+    status_code: Optional[int] = None,
+    **metadata,
+) -> None:
+    event = {
+        "event": "audit",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "action": action,
+        "outcome": outcome,
+        "request_id": _get_request_id(request) if request else "",
+        "ip": _get_client_ip(request),
+    }
+    if request is not None:
+        event["path"] = request.url.path
+        event["method"] = request.method
+    if user_id is not None:
+        event["user_id"] = int(user_id)
+    if username:
+        event["username"] = str(username)[:64]
+    if status_code is not None:
+        event["status_code"] = int(status_code)
+    for key, value in metadata.items():
+        if value is None:
+            continue
+        if isinstance(value, str):
+            event[key] = value[:160]
+        elif isinstance(value, (int, float, bool)):
+            event[key] = value
+        else:
+            event[key] = str(value)[:160]
+    audit_logger.info(json.dumps(event, ensure_ascii=False, sort_keys=True))
 
 
 def _check_database_health() -> Dict:
@@ -925,11 +993,12 @@ def _ensure_unique_username(db, base_username: str) -> str:
 @limit_decorator("10/minute")
 async def login(request: Request, credentials: LoginRequest):
     """Authenticate a local account using username + password."""
-    username = _validate_local_username(credentials.username)
-    password = _validate_local_password(credentials.password)
+    username = _normalize_local_username(credentials.username)
 
     db = SyncSessionLocal()
     try:
+        username = _validate_local_username(credentials.username)
+        password = _validate_local_password(credentials.password)
         _ensure_local_auth_columns(db)
         db.commit()
         user_query = text(
@@ -956,12 +1025,39 @@ async def login(request: Request, credentials: LoginRequest):
         if not _verify_password(password, user[3]):
             raise HTTPException(status_code=401, detail="Incorrect password.")
 
-        return _build_token_response(user[0], user[1], auth_provider="local")
-    except HTTPException:
+        response = _build_token_response(user[0], user[1], auth_provider="local")
+        _audit_log(
+            request,
+            "auth.login",
+            "success",
+            user_id=int(user[0]),
+            username=user[1],
+            status_code=200,
+            auth_provider="local",
+        )
+        return response
+    except HTTPException as exc:
+        _audit_log(
+            request,
+            "auth.login",
+            "rejected" if exc.status_code < 500 else "error",
+            username=username or None,
+            status_code=exc.status_code,
+            auth_provider="local",
+            reason=str(exc.detail),
+        )
         raise
-    except Exception as e:
+    except Exception:
         db.rollback()
-        print(f"[AUTH] Local login failed: {e}")
+        logger.exception("Local login failed for username=%s", username)
+        _audit_log(
+            request,
+            "auth.login",
+            "error",
+            username=username or None,
+            status_code=500,
+            auth_provider="local",
+        )
         raise HTTPException(status_code=500, detail="Unable to sign in right now.")
     finally:
         db.close()
@@ -970,11 +1066,12 @@ async def login(request: Request, credentials: LoginRequest):
 @limit_decorator("10/minute")
 async def signup(request: Request, credentials: SignupRequest):
     """Create a local account using username + password."""
-    username = _validate_local_username(credentials.username)
-    password = _validate_local_password(credentials.password)
+    username = _normalize_local_username(credentials.username)
 
     db = SyncSessionLocal()
     try:
+        username = _validate_local_username(credentials.username)
+        password = _validate_local_password(credentials.password)
         _ensure_local_auth_columns(db)
         db.commit()
 
@@ -1004,7 +1101,18 @@ async def signup(request: Request, credentials: SignupRequest):
                 {"password_hash": password_hash, "user_id": existing_user[0]},
             )
             db.commit()
-            return _build_token_response(existing_user[0], existing_user[1], auth_provider="local")
+            response = _build_token_response(existing_user[0], existing_user[1], auth_provider="local")
+            _audit_log(
+                request,
+                "auth.signup",
+                "success",
+                user_id=int(existing_user[0]),
+                username=existing_user[1],
+                status_code=200,
+                auth_provider="local",
+                reused_existing_account=True,
+            )
+            return response
 
         result = db.execute(
             text(
@@ -1015,13 +1123,41 @@ async def signup(request: Request, credentials: SignupRequest):
         )
         user_id = result.fetchone()[0]
         db.commit()
-        return _build_token_response(user_id, username, auth_provider="local")
-    except HTTPException:
+        response = _build_token_response(user_id, username, auth_provider="local")
+        _audit_log(
+            request,
+            "auth.signup",
+            "success",
+            user_id=int(user_id),
+            username=username,
+            status_code=200,
+            auth_provider="local",
+            reused_existing_account=False,
+        )
+        return response
+    except HTTPException as exc:
         db.rollback()
+        _audit_log(
+            request,
+            "auth.signup",
+            "rejected" if exc.status_code < 500 else "error",
+            username=username or None,
+            status_code=exc.status_code,
+            auth_provider="local",
+            reason=str(exc.detail),
+        )
         raise
-    except Exception as e:
+    except Exception:
         db.rollback()
-        print(f"[AUTH] Signup failed: {e}")
+        logger.exception("Signup failed for username=%s", username)
+        _audit_log(
+            request,
+            "auth.signup",
+            "error",
+            username=username or None,
+            status_code=500,
+            auth_provider="local",
+        )
         raise HTTPException(status_code=500, detail="Unable to create your account right now.")
     finally:
         db.close()
@@ -1032,18 +1168,37 @@ async def firebase_config():
     return get_firebase_public_config()
 
 @app.post("/api/auth/firebase/login")
-async def firebase_login(request: FirebaseLoginRequest):
+async def firebase_login(request: Request, payload: FirebaseLoginRequest):
     """Authenticate via Firebase ID token and map to local user record."""
-    decoded = verify_firebase_id_token(request.id_token)
+    username_hint = (payload.username_hint or "").strip()
+    decoded = verify_firebase_id_token(payload.id_token)
     if not decoded:
+        _audit_log(
+            request,
+            "auth.firebase_login",
+            "rejected",
+            username=username_hint or None,
+            status_code=400,
+            auth_provider="firebase",
+            reason="Firebase authentication is not configured or token is invalid",
+        )
         raise HTTPException(status_code=400, detail="Firebase authentication is not configured or token is invalid")
 
     firebase_uid = str(decoded.get("uid") or "").strip()
     if not firebase_uid:
+        _audit_log(
+            request,
+            "auth.firebase_login",
+            "rejected",
+            username=username_hint or None,
+            status_code=400,
+            auth_provider="firebase",
+            reason="Firebase token missing uid",
+        )
         raise HTTPException(status_code=400, detail="Firebase token missing uid")
 
     email = (decoded.get("email") or "").strip().lower() or None
-    display_name = (decoded.get("name") or request.username_hint or "").strip()
+    display_name = (decoded.get("name") or username_hint or "").strip()
     picture = (decoded.get("picture") or "").strip() or None
 
     db = SyncSessionLocal()
@@ -1076,9 +1231,19 @@ async def firebase_login(request: FirebaseLoginRequest):
                 },
             )
             db.commit()
-            return _build_token_response(user[0], user[1], auth_provider="firebase")
+            response = _build_token_response(user[0], user[1], auth_provider="firebase")
+            _audit_log(
+                request,
+                "auth.firebase_login",
+                "success",
+                user_id=int(user[0]),
+                username=user[1],
+                status_code=200,
+                auth_provider="firebase",
+            )
+            return response
 
-        username = _ensure_unique_username(db, _pick_username_seed(decoded, request.username_hint))
+        username = _ensure_unique_username(db, _pick_username_seed(decoded, username_hint))
         result = db.execute(
             text(
                 "INSERT INTO users (username, firebase_uid, email, avatar_url, risk_appetite, capital_amount) "
@@ -1093,12 +1258,39 @@ async def firebase_login(request: FirebaseLoginRequest):
         )
         user_id = result.fetchone()[0]
         db.commit()
-        return _build_token_response(user_id, username, auth_provider="firebase")
-    except HTTPException:
+        response = _build_token_response(user_id, username, auth_provider="firebase")
+        _audit_log(
+            request,
+            "auth.firebase_login",
+            "success",
+            user_id=int(user_id),
+            username=username,
+            status_code=200,
+            auth_provider="firebase",
+        )
+        return response
+    except HTTPException as exc:
+        _audit_log(
+            request,
+            "auth.firebase_login",
+            "rejected" if exc.status_code < 500 else "error",
+            username=username_hint or None,
+            status_code=exc.status_code,
+            auth_provider="firebase",
+            reason=str(exc.detail),
+        )
         raise
-    except Exception as e:
+    except Exception:
         db.rollback()
-        print(f"[FIREBASE AUTH] Login failed: {e}")
+        logger.exception("Firebase login failed for username_hint=%s", username_hint or None)
+        _audit_log(
+            request,
+            "auth.firebase_login",
+            "error",
+            username=username_hint or None,
+            status_code=500,
+            auth_provider="firebase",
+        )
         raise HTTPException(status_code=500, detail="Firebase login failed")
     finally:
         db.close()
@@ -1294,7 +1486,8 @@ class PortfolioUpdateRequest(BaseModel):
 
 @app.post("/api/portfolio/update")
 async def update_portfolio(
-    request: PortfolioUpdateRequest,
+    request: Request,
+    payload: PortfolioUpdateRequest,
     current_user: Dict = Depends(get_current_user),
 ):
     """Update user capital and portfolio holdings."""
@@ -1309,14 +1502,14 @@ async def update_portfolio(
         # Update capital
         db.execute(
             text("UPDATE users SET capital_amount = :cap WHERE id = :uid"), 
-            {"cap": request.capital_amount, "uid": user_id}
+            {"cap": payload.capital_amount, "uid": user_id}
         )
         
         # Clear old holdings
         db.execute(text("DELETE FROM portfolios WHERE user_id = :uid"), {"uid": user_id})
 
         normalized_holdings = {}
-        for h in request.holdings:
+        for h in payload.holdings:
             symbol = h.symbol.upper().strip()
             if symbol and h.quantity > 0:
                 existing = normalized_holdings.get(symbol, {"quantity": 0, "avg_price": None})
@@ -1374,6 +1567,18 @@ async def update_portfolio(
             delay_seconds=1,
             force=True,
         )
+        _audit_log(
+            request,
+            "portfolio.update",
+            "success",
+            user_id=user_id,
+            username=current_user.get("username"),
+            status_code=200,
+            capital_amount=round(float(payload.capital_amount), 2),
+            holdings_count=len(payload.holdings),
+            symbol_count=len(normalized_holdings),
+            automation_queued=bool(queued),
+        )
         return {
             "status": "success",
             "automation": {
@@ -1381,11 +1586,31 @@ async def update_portfolio(
                 "analysis_type": "morning",
             },
         }
-    except Exception as e:
+    except HTTPException as exc:
         db.rollback()
-        if isinstance(e, HTTPException):
-            raise e
-        print(f"[PORTFOLIO ERROR] Failed to persist portfolio update for user {user_id}: {e}")
+        _audit_log(
+            request,
+            "portfolio.update",
+            "rejected" if exc.status_code < 500 else "error",
+            user_id=user_id,
+            username=current_user.get("username"),
+            status_code=exc.status_code,
+            holdings_count=len(payload.holdings),
+            reason=str(exc.detail),
+        )
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to persist portfolio update for user_id=%s", user_id)
+        _audit_log(
+            request,
+            "portfolio.update",
+            "error",
+            user_id=user_id,
+            username=current_user.get("username"),
+            status_code=500,
+            holdings_count=len(payload.holdings),
+        )
         raise HTTPException(
             status_code=500,
             detail="Could not save portfolio right now. Please try again shortly.",
@@ -1597,22 +1822,66 @@ async def trigger_agent(
     current_user: Dict = Depends(get_current_user),
 ):
     """Manually trigger agent analysis."""
+    user_id = int(current_user["user_id"])
     try:
-        user_id = int(current_user["user_id"])
         result = await _execute_agent_analysis(
             user_id,
             payload.analysis_type,
             symbol=payload.symbol,
             trigger_source='manual',
         )
+        _audit_log(
+            request,
+            "agent.trigger",
+            "success",
+            user_id=user_id,
+            username=current_user.get("username"),
+            status_code=200,
+            analysis_type=payload.analysis_type,
+            symbol=payload.symbol,
+        )
         return result
     except asyncio.TimeoutError:
+        _audit_log(
+            request,
+            "agent.trigger",
+            "timeout",
+            user_id=user_id,
+            username=current_user.get("username"),
+            status_code=504,
+            analysis_type=payload.analysis_type,
+            symbol=payload.symbol,
+        )
         raise HTTPException(status_code=504, detail="Agent analysis timed out")
-    except HTTPException:
+    except HTTPException as exc:
+        _audit_log(
+            request,
+            "agent.trigger",
+            "rejected" if exc.status_code < 500 else "error",
+            user_id=user_id,
+            username=current_user.get("username"),
+            status_code=exc.status_code,
+            analysis_type=payload.analysis_type,
+            symbol=payload.symbol,
+            reason=str(exc.detail),
+        )
         raise
-    except Exception as e:
-        print(f"[Agent] Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("Agent trigger failed for user_id=%s", user_id)
+        _audit_log(
+            request,
+            "agent.trigger",
+            "error",
+            user_id=user_id,
+            username=current_user.get("username"),
+            status_code=500,
+            analysis_type=payload.analysis_type,
+            symbol=payload.symbol,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Agent analysis failed right now. Please try again shortly.",
+        )
 
 
 @app.get("/api/agent/status")
@@ -1692,30 +1961,81 @@ async def get_predictions_history(
 # --- Chatbot Assistance ---
 @app.post("/api/chat")
 async def chat_endpoint(
-    request: ChatMessageRequest,
+    request: Request,
+    payload: ChatMessageRequest,
     current_user: Dict = Depends(get_current_user),
 ):
     """Handle newbie chat requests from frontend."""
+    user_id = int(current_user["user_id"])
+    message_length = len((payload.message or "").strip())
     try:
-        if not request.message.strip():
+        if not payload.message.strip():
+            _audit_log(
+                request,
+                "chat.reply",
+                "empty_message",
+                user_id=user_id,
+                username=current_user.get("username"),
+                status_code=200,
+                history_items=len(payload.history),
+                message_length=message_length,
+                app_context_keys=len(payload.app_context),
+            )
             return {"reply": "Vui lòng nhập câu hỏi nhé!"}
         
         reply = await asyncio.to_thread(
             agent.llm.chat_assistant, 
-            request.message, 
-            request.history,
-            request.app_context,
+            payload.message, 
+            payload.history,
+            payload.app_context,
+        )
+        _audit_log(
+            request,
+            "chat.reply",
+            "success",
+            user_id=user_id,
+            username=current_user.get("username"),
+            status_code=200,
+            history_items=len(payload.history),
+            message_length=message_length,
+            app_context_keys=len(payload.app_context),
         )
         return {"reply": reply}
-    except Exception as e:
-        print(f"[chat_endpoint] Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("Chat request failed for user_id=%s", user_id)
+        _audit_log(
+            request,
+            "chat.reply",
+            "error",
+            user_id=user_id,
+            username=current_user.get("username"),
+            status_code=500,
+            history_items=len(payload.history),
+            message_length=message_length,
+            app_context_keys=len(payload.app_context),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Chat assistant is unavailable right now. Please try again shortly.",
+        )
 
 # ─── WebSocket ───────────────────────────────────────────
 
+def _extract_ws_user_id(websocket: WebSocket) -> Optional[int]:
+    """Extract user_id from JWT token passed as query parameter."""
+    token = websocket.query_params.get("token")
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[JWT_ALGORITHM])
+        return int(payload.get("sub", 0)) or None
+    except (JWTError, ValueError, TypeError):
+        return None
+
 @app.websocket("/ws/prices")
 async def websocket_prices(websocket: WebSocket):
-    await ws_manager.connect(websocket)
+    user_id = _extract_ws_user_id(websocket)
+    await ws_manager.connect(websocket, user_id=user_id)
     try:
         while True:
             data = await websocket.receive_text()
@@ -1732,9 +2052,11 @@ async def websocket_prices(websocket: WebSocket):
 
 @app.websocket("/ws/agent")
 async def websocket_agent(websocket: WebSocket):
-    await ws_manager.connect(websocket)
+    user_id = _extract_ws_user_id(websocket)
+    await ws_manager.connect(websocket, user_id=user_id)
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)
+

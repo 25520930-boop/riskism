@@ -712,9 +712,48 @@ except Exception as e:
     print(f"  ❌ FAIL: {e}")
 
 
+# ─── TEST 14: Security Hardening Contract ────────────────
+print("\n🛡️ Test 14: Security hardening contract")
+try:
+    main_source = (repo_root / 'backend' / 'main.py').read_text()
+    config_source = (repo_root / 'backend' / 'config.py').read_text()
+    env_source = (repo_root / '.env.example').read_text()
+
+    assert 'TrustedHostMiddleware' in main_source, "Backend phải bật TrustedHostMiddleware"
+    assert 'allow_origins=["*"]' not in main_source, "CORS không được dùng wildcard origins nữa"
+    assert 'allow_credentials=True' not in main_source, "CORS không nên bật credentials khi đang dùng Bearer token"
+    assert 'settings.cors_allowed_origin_list' in main_source, "CORS phải đọc origin allowlist từ config"
+    assert 'settings.trusted_host_list' in main_source, "Trusted hosts phải đọc từ config"
+    assert 'cors_allowed_origins' in config_source and 'trusted_hosts' in config_source, "config.py phải có cors_allowed_origins + trusted_hosts"
+    assert 'CORS_ALLOWED_ORIGINS=' in env_source and 'TRUSTED_HOSTS=' in env_source, ".env.example phải khai báo CORS_ALLOWED_ORIGINS + TRUSTED_HOSTS"
+    assert 'def _audit_log(' in main_source, "Backend phải có helper audit log"
+    for action in [
+        '"auth.login"',
+        '"auth.signup"',
+        '"auth.firebase_login"',
+        '"portfolio.update"',
+        '"agent.trigger"',
+        '"chat.reply"',
+    ]:
+        assert action in main_source, f"Thiếu audit action {action}"
+    assert 'detail=str(e)' not in main_source, "Backend không được trả raw exception detail ra client"
+    assert 'Agent analysis failed right now. Please try again shortly.' in main_source, "Agent trigger phải trả 500 message an toàn"
+    assert 'Chat assistant is unavailable right now. Please try again shortly.' in main_source, "Chat endpoint phải trả 500 message an toàn"
+    print("  ✅ CORS/trusted-host: đã chuyển sang allowlist có cấu hình qua env")
+    print("  ✅ Audit logging: đã có cho auth, portfolio, agent, chat")
+    print("  ✅ Safe errors: không còn leak raw exception detail ở route nhạy cảm")
+
+    passed += 1
+    print("  ✅ PASS — Security hardening contract đã được khóa!")
+
+except Exception as e:
+    errors.append(f"Security Hardening: {e}")
+    print(f"  ❌ FAIL: {e}")
+
+
 # ─── KẾT QUẢ TỔNG ────────────────────────────────────────
 print("\n" + "=" * 60)
-print(f"📊 KẾT QUẢ: {passed}/13 tests PASSED")
+print(f"📊 KẾT QUẢ: {passed}/14 tests PASSED")
 if errors:
     print(f"❌ LỖI ({len(errors)}):")
     for e in errors:
